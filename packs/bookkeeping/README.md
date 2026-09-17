@@ -1,7 +1,7 @@
 # Bookkeeping pack
 
-Skills for keeping the books of a small Austrian business with an Instafy agent. The pack
-folder is itself a valid Instafy workspace: every skill lives under `.agents/skills/<name>/`.
+Skills for keeping the books of a small Austrian business with an agent. The pack
+folder is itself a valid agent workspace: every skill lives under `.agents/skills/<name>/`.
 
 ## Skills
 
@@ -35,7 +35,7 @@ you once this pack is published.
   `FREEFINANCE_API_CLIENT_ID` and `FREEFINANCE_API_CLIENT_SECRET` by name through the
   secrets card. Never paste them in chat.
 - Nothing to install: the client has zero dependencies and runs on the Node 24 that the
-  Instafy runtime ships.
+  agent runtime ships.
 
 ## Boundaries
 

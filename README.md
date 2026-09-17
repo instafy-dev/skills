@@ -35,6 +35,7 @@ Rules:
 | Pack | Skills | Notes |
 | --- | --- | --- |
 | [bookkeeping](./packs/bookkeeping/) | freefinance (books-at planned) | Austrian small-business books with FreeFinance as the system of record |
+| [team](./packs/team/) | notion (slack, discord planned) | The tools a team talks and writes in, starting with Notion pages and databases |
 
 ## Install a skill or a pack
 

@@ -16,6 +16,7 @@ import {
   incomingInvoicesPath,
   invoiceBookingsPath,
   issuerTokenUrl,
+  scrub,
   journalsPath,
   main,
   maskIdentity,
@@ -243,6 +244,32 @@ test("the token endpoint must be HTTPS on the API's own domain", () => {
   assert.throws(() => issuerTokenUrl("http://accounts.example.test/auth", BASE_URL), /HTTPS/);
   assert.throws(() => issuerTokenUrl("https://evil.example.org/auth", BASE_URL), /not on the API's domain/);
   assert.throws(() => issuerTokenUrl("not a url", BASE_URL), /not a valid URL/);
+  // A base host on a public suffix does not let every sibling host through.
+  assert.throws(
+    () => issuerTokenUrl("https://evil.co.uk/auth", "https://app.example.co.uk"),
+    /not on the API's domain/,
+  );
+  assert.equal(
+    issuerTokenUrl("https://accounts.example.co.uk/auth", "https://app.example.co.uk"),
+    "https://accounts.example.co.uk/auth/protocol/openid-connect/token",
+  );
+  // A two-label base host accepts only itself.
+  assert.equal(
+    issuerTokenUrl("https://example.test/auth", "https://example.test"),
+    "https://example.test/auth/protocol/openid-connect/token",
+  );
+  assert.throws(
+    () => issuerTokenUrl("https://accounts.example.test/auth", "https://example.test"),
+    /not on the API's domain/,
+  );
+});
+
+test("scrub removes every credential value and leaves short values alone", () => {
+  assert.equal(
+    scrub(`id ${API_CLIENT_ID} secret ${API_CLIENT_SECRET}`, [API_CLIENT_SECRET, API_CLIENT_ID]),
+    "id *** secret ***",
+  );
+  assert.equal(scrub("total 12345", ["12345", ""]), "total 12345");
 });
 
 test("rejects side-effect fields recursively, in camel and snake case", () => {
@@ -664,11 +691,14 @@ test("upload-staging refuses duplicates, oversized files, unsupported types and 
   assert.equal(unsupported.code, 1);
   assert.match(unsupported.stderr, /Unsupported staging file type/);
 
-  // A file next to the workspace, reached through .. or an absolute path.
+  // A file next to the workspace, reached through .., an absolute path, a
+  // symlink inside the workspace, or a symlinked directory.
   const outside = await writeFixture("outside.pdf", Buffer.from("%PDF"));
   const workspace = path.join(outside.dir, "workspace");
   await fs.mkdir(workspace);
-  for (const source of ["../outside.pdf", outside.file, "."]) {
+  await fs.symlink(outside.file, path.join(workspace, "link.pdf"));
+  await fs.symlink(outside.dir, path.join(workspace, "linked-dir"));
+  for (const source of ["../outside.pdf", outside.file, ".", "link.pdf", "linked-dir/outside.pdf"]) {
     const refused = await runMain(
       ["upload-staging", "--client", CLIENT_ID, "--file", source, "--confirm"],
       { fetch, cwd: workspace },
@@ -722,6 +752,35 @@ test("status masks the id, reports the secret as configured, and prints neither"
   assert.ok(!stdout.includes("token-"));
 });
 
+test("a token endpoint error that echoes a credential is scrubbed from stdout and stderr", async () => {
+  const rejecting = async (url) => {
+    const text = String(url);
+    if (text.endsWith("/api/2.0/auth/issuer")) {
+      return jsonResponse({ realm: "demo", url: ISSUER_URL });
+    }
+    if (text.endsWith("/protocol/openid-connect/token")) {
+      return jsonResponse(
+        { error: "invalid_client", error_description: `bad client ${API_CLIENT_ID} with ${API_CLIENT_SECRET}` },
+        401,
+      );
+    }
+    return jsonResponse({});
+  };
+  const listing = await runMain(["clients"], { fetch: rejecting });
+  assert.equal(listing.code, 1);
+  assert.match(listing.stderr, /failed \(401\): bad client \*\*\* with \*\*\*/);
+  assert.ok(!listing.stderr.includes(API_CLIENT_SECRET));
+  assert.ok(!listing.stderr.includes(API_CLIENT_ID));
+  assert.equal(listing.stdout, "");
+
+  const status = await runMain(["status"], { fetch: rejecting });
+  assert.equal(status.code, 0);
+  const report = JSON.parse(status.stdout);
+  assert.match(report.token, /failed \(401\): bad client \*\*\* with \*\*\*/);
+  assert.ok(!status.stdout.includes(API_CLIENT_SECRET));
+  assert.ok(!status.stdout.includes(API_CLIENT_ID));
+});
+
 test("status without credentials reports missing and skips the token check", async () => {
   const fetch = fakeFetch(() => jsonResponse({}));
   const { code, stdout } = await runMain(["status"], {
@@ -740,7 +799,7 @@ test("status without credentials reports missing and skips the token check", asy
 // Error surfaces
 // ---------------------------------------------------------------------------
 
-test("reads without credentials name the two project secrets", async () => {
+test("reads without credentials name the two credential variables", async () => {
   const fetch = fakeFetch(() => jsonResponse({}));
   const { code, stderr } = await runMain(["clients"], {
     fetch,

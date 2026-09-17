@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// FreeFinance API v2 client for the Instafy freefinance skill.
+// FreeFinance API v2 client for the freefinance skill.
 //
 // Zero dependencies, Node 24, ESM. Credentials come from the environment only:
-//   FREEFINANCE_API_CLIENT_ID      technical user id (Project Secret)
-//   FREEFINANCE_API_CLIENT_SECRET  technical user secret (Project Secret)
-//   FREEFINANCE_CLIENT_ID          optional numeric Mandant override (not secret)
+//   FREEFINANCE_API_CLIENT_ID      technical user id (sensitive)
+//   FREEFINANCE_API_CLIENT_SECRET  technical user secret (sensitive)
+//   FREEFINANCE_CLIENT_ID          optional numeric Mandant override (not sensitive)
 //   FREEFINANCE_API_BASE_URL       optional, defaults to https://app.freefinance.at
 //
 // Every command is a read (HTTP GET) except `upload-staging --confirm`, which is
@@ -312,6 +312,20 @@ export function maskIdentity(value) {
   return text ? "configured" : "missing";
 }
 
+// Removes every credential value from text bound for stdout or stderr, so an
+// error body that echoes one is never printed.
+export function scrub(text, secrets) {
+  let message = String(text ?? "");
+  for (const secret of Array.isArray(secrets) ? secrets : [secrets]) {
+    // Values shorter than eight characters are not credentials and would
+    // mangle ordinary numbers in the output.
+    if (typeof secret === "string" && secret.length >= 8) {
+      message = message.split(secret).join("***");
+    }
+  }
+  return message;
+}
+
 export function issuerTokenUrl(issuerUrl, baseUrl) {
   let parsed;
   try {
@@ -322,9 +336,19 @@ export function issuerTokenUrl(issuerUrl, baseUrl) {
   if (parsed.protocol !== "https:") {
     throw new Error("FreeFinance issuer URL must use HTTPS.");
   }
-  const registrable = (host) => host.split(".").slice(-2).join(".");
+  // The issuer may be the API host itself, or a sibling host under the API
+  // host's parent (app.example.test allows accounts.example.test). Comparing
+  // the last two labels would let any host on a public suffix such as co.uk
+  // through, so the rule is anchored on the configured host instead.
   const baseHost = new URL(normalizeBaseUrl(baseUrl)).hostname;
-  if (registrable(parsed.hostname) !== registrable(baseHost)) {
+  const issuerHost = parsed.hostname;
+  const baseLabels = baseHost.split(".");
+  const siblingSuffix =
+    baseLabels.length >= 3 ? `.${baseLabels.slice(1).join(".")}` : null;
+  const onApiDomain =
+    issuerHost === baseHost ||
+    (siblingSuffix !== null && issuerHost.endsWith(siblingSuffix));
+  if (!onApiDomain) {
     throw new Error("FreeFinance issuer URL is not on the API's domain.");
   }
   parsed.search = "";
@@ -559,7 +583,7 @@ export function readSettings(env = process.env) {
 function requireCredentials(settings) {
   if (!settings.apiClientId || !settings.apiClientSecret) {
     throw new Error(
-      "Set FREEFINANCE_API_CLIENT_ID and FREEFINANCE_API_CLIENT_SECRET as project secrets.",
+      "Set FREEFINANCE_API_CLIENT_ID and FREEFINANCE_API_CLIENT_SECRET in the environment.",
     );
   }
 }
@@ -571,6 +595,7 @@ export function createClient({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const settings = readSettings(env);
+  const credentials = [settings.apiClientSecret, settings.apiClientId];
   let cachedToken = null;
 
   async function mintToken() {
@@ -735,11 +760,9 @@ export function createClient({
     if (!filePath) throw new Error("upload-staging requires --file <path>.");
     const absolutePath = path.resolve(cwd, filePath);
     const relativePath = path.relative(cwd, absolutePath);
-    if (
-      !relativePath ||
-      relativePath.startsWith("..") ||
-      path.isAbsolute(relativePath)
-    ) {
+    const insideWorkspace = (relative) =>
+      Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+    if (!insideWorkspace(relativePath)) {
       throw new Error("Upload source must be inside the workspace.");
     }
     const fileName = path.basename(absolutePath);
@@ -749,7 +772,17 @@ export function createClient({
         "Unsupported staging file type. Use pdf, xml, gif, jpg, jpeg, png, tif, tiff or webp.",
       );
     }
-    const stats = await fs.stat(absolutePath);
+    // Symlinks are refused and the real paths are compared, so a link inside
+    // the workspace cannot upload a file from outside it.
+    if ((await fs.lstat(absolutePath)).isSymbolicLink()) {
+      throw new Error("Upload source must be inside the workspace, not a symlink.");
+    }
+    const realCwd = await fs.realpath(cwd);
+    const realPath = await fs.realpath(absolutePath);
+    if (!insideWorkspace(path.relative(realCwd, realPath))) {
+      throw new Error("Upload source must be inside the workspace.");
+    }
+    const stats = await fs.stat(realPath);
     if (!stats.isFile()) throw new Error("Upload source is not a regular file.");
     if (stats.size > MAX_STAGING_BYTES) {
       throw new Error("FreeFinance staging uploads are limited to 2 MiB.");
@@ -789,7 +822,7 @@ export function createClient({
       throw new Error(`A staging file named '${fileName}' already exists.`);
     }
 
-    const bytes = await fs.readFile(absolutePath);
+    const bytes = await fs.readFile(realPath);
     const form = new FormData();
     if (Object.keys(metadata).length > 0) {
       form.append(
@@ -823,7 +856,7 @@ export function createClient({
       await mintToken();
       report.token = "ok";
     } catch (error) {
-      report.token = `failed: ${error.message}`;
+      report.token = `failed: ${scrub(error.message, credentials)}`;
       return report;
     }
     try {
@@ -831,7 +864,7 @@ export function createClient({
       report.client_id = resolved.id;
       report.client_source = resolved.source;
     } catch (error) {
-      report.client_id = `not selected: ${error.message}`;
+      report.client_id = `not selected: ${scrub(error.message, credentials)}`;
     }
     return report;
   }
@@ -1009,13 +1042,21 @@ List options:
 `;
 }
 
-function printJson(write, value, compact) {
-  write(compact ? JSON.stringify(value) : JSON.stringify(value, null, 2));
+function printJson(write, value, compact, secrets) {
+  const text = compact ? JSON.stringify(value) : JSON.stringify(value, null, 2);
+  write(scrub(text, secrets));
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const stdout = deps.stdout ?? ((text) => process.stdout.write(`${text}\n`));
   const stderr = deps.stderr ?? ((text) => process.stderr.write(`${text}\n`));
+  // Both credential values are scrubbed from everything written to stdout or
+  // stderr, so an error body that echoes one never reaches the terminal.
+  const env = deps.env ?? process.env;
+  const secrets = [
+    String(env.FREEFINANCE_API_CLIENT_SECRET ?? ""),
+    String(env.FREEFINANCE_API_CLIENT_ID ?? "").trim(),
+  ];
 
   try {
     const [command, ...rest] = argv;
@@ -1039,7 +1080,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     const client = createClient(deps);
     const clientFlag = options.client ?? null;
     const compact = Boolean(options.compact);
-    const out = (value) => printJson(stdout, value, compact);
+    const out = (value) => printJson(stdout, value, compact, secrets);
     const mandant = async () => (await client.resolveClientId(clientFlag)).id;
 
     switch (command) {
@@ -1118,7 +1159,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         throw new Error(`Unknown command '${command}'. Run with --help.`);
     }
   } catch (error) {
-    stderr(error?.message ?? String(error));
+    stderr(scrub(error?.message ?? String(error), secrets));
     return 1;
   }
 }

@@ -1,8 +1,8 @@
 {
-  "name": "@instafy-dev/freefinance-skill",
+  "name": "@instafy-dev/notion-skill",
   "version": "0.1.0",
   "private": true,
-  "description": "FreeFinance API v2 client for the freefinance skill. Zero dependencies.",
+  "description": "Notion API client for the notion skill. Zero dependencies.",
   "type": "module",
   "engines": {
     "node": ">=24"
