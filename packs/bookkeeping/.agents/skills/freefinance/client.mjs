@@ -12,6 +12,7 @@
 // policy is enforced in one place (assertWriteAllowed) so no other method or path
 // can ever be sent, whatever the command layer does.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -19,7 +20,13 @@ import { pathToFileURL } from "node:url";
 
 export const DEFAULT_BASE_URL = "https://app.freefinance.at";
 export const PROFILE_RELATIVE_PATH = path.join("bookkeeping", "profile.json");
-export const MAX_STAGING_BYTES = 2 * 1024 * 1024;
+// FreeFinance says 2 MB, not 2 MiB, in both places it documents the limit:
+// "The current maximum size for one file is 2MB" (openapi.json 2.0.0-beta9,
+// postStaging) and "The upload API only allows files with a maximum size of
+// 2 MB" (freefinance-dev.github.io), both read 2026-09-18. Using 2 MiB let a
+// file between 2,000,000 and 2,097,152 bytes pass the dry run and fail on the
+// confirmed upload, which is the one request the user had already approved.
+export const MAX_STAGING_BYTES = 2_000_000;
 export const MAX_API_PAGE_SIZE = 500;
 export const MAX_ALL_PAGES = 20;
 export const PAGE_DELAY_MS = 150;
@@ -302,6 +309,86 @@ export function mimeTypeFor(filePath) {
     ".xml": "application/xml",
   };
   return types[extension] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// The staging multipart body (pure)
+// ---------------------------------------------------------------------------
+
+// A boundary made of hex and dashes, which needs no quoting in the header.
+export function stagingBoundary(uuid = randomUUID) {
+  return `freefinance-${uuid()}`;
+}
+
+// FreeFinance stores the document under this name, taken from the attachment's
+// Content-Disposition. The name is interpolated into a quoted header
+// parameter, so a quote, a backslash or a line break in it could rewrite the
+// request; such a file is refused before the plan is even shown.
+export function stagingFileName(value) {
+  const name = String(value ?? "");
+  if (!name || /["\\\r\n]/.test(name)) {
+    throw new Error(
+      "Upload file name must not be empty or contain a quote, a backslash or a line break.",
+    );
+  }
+  return name;
+}
+
+// FreeFinance documents the staging upload as two parts: an optional JSON
+// payload named "metadata" with no filename, then the binary attachment named
+// "content", and it takes the stored file name from the first attachment's
+// Content-Disposition. Node's FormData cannot express that, because it turns
+// every Blob part into a file and names it "blob" when no filename is given.
+// That made the metadata part the first attachment and would have stored the
+// document under the name "blob", so the body is written out here instead.
+export function buildStagingBody({
+  fileName,
+  contentType,
+  bytes,
+  metadata = null,
+  boundary,
+}) {
+  const name = stagingFileName(fileName);
+  const type = nonEmptyText(contentType, "Content type");
+  const marker = String(boundary ?? "");
+  if (!/^[A-Za-z0-9'()+_,\-./:=?]{1,70}$/.test(marker)) {
+    throw new Error("Multipart boundary contains unexpected characters.");
+  }
+  const payload = Buffer.from(bytes);
+  const json =
+    metadata && Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
+  const markerBytes = Buffer.from(marker, "utf8");
+  if (payload.includes(markerBytes) || (json !== null && json.includes(marker))) {
+    throw new Error("Multipart boundary collides with the request content.");
+  }
+
+  const parts = [];
+  if (json !== null) {
+    parts.push(
+      Buffer.from(
+        `--${marker}\r\n` +
+          `Content-Disposition: form-data; name="metadata"\r\n` +
+          "Content-Type: application/json\r\n\r\n" +
+          `${json}\r\n`,
+        "utf8",
+      ),
+    );
+  }
+  parts.push(
+    Buffer.from(
+      `--${marker}\r\n` +
+        `Content-Disposition: form-data; name="content"; filename="${name}"\r\n` +
+        `Content-Type: ${type}\r\n\r\n`,
+      "utf8",
+    ),
+    payload,
+    Buffer.from(`\r\n--${marker}--\r\n`, "utf8"),
+  );
+
+  return {
+    body: Buffer.concat(parts),
+    contentType: `multipart/form-data; boundary=${marker}`,
+  };
 }
 
 export function maskIdentity(value) {
@@ -593,6 +680,7 @@ export function createClient({
   fetch: fetchImpl = globalThis.fetch,
   cwd = process.cwd(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  uuid = randomUUID,
 } = {}) {
   const settings = readSettings(env);
   const credentials = [settings.apiClientSecret, settings.apiClientId];
@@ -765,7 +853,7 @@ export function createClient({
     if (!insideWorkspace(relativePath)) {
       throw new Error("Upload source must be inside the workspace.");
     }
-    const fileName = path.basename(absolutePath);
+    const fileName = stagingFileName(path.basename(absolutePath));
     const contentType = mimeTypeFor(absolutePath);
     if (!contentType) {
       throw new Error(
@@ -785,7 +873,7 @@ export function createClient({
     const stats = await fs.stat(realPath);
     if (!stats.isFile()) throw new Error("Upload source is not a regular file.");
     if (stats.size > MAX_STAGING_BYTES) {
-      throw new Error("FreeFinance staging uploads are limited to 2 MiB.");
+      throw new Error("FreeFinance staging uploads are limited to 2 MB.");
     }
     const metadata = {};
     if (description !== null) {
@@ -823,24 +911,33 @@ export function createClient({
     }
 
     const bytes = await fs.readFile(realPath);
-    const form = new FormData();
-    if (Object.keys(metadata).length > 0) {
-      form.append(
-        "metadata",
-        new Blob([JSON.stringify(metadata)], { type: "application/json" }),
-      );
-    }
-    form.append("content", new Blob([bytes], { type: contentType }), fileName);
+    const multipart = buildStagingBody({
+      fileName,
+      contentType,
+      bytes,
+      metadata,
+      boundary: stagingBoundary(uuid),
+    });
 
     const result = await apiRequest(
       `/clients/${resolved.id}/doc/providers/DMS/staging`,
-      { method: "POST", body: form, fields: metadata },
+      {
+        method: "POST",
+        body: multipart.body,
+        headers: { "Content-Type": multipart.contentType },
+        fields: metadata,
+      },
     );
     return { dry_run: false, ...plan, result };
   }
 
+  // `ok` is the whole report in one boolean: true only when the credentials
+  // minted a token and a Mandant came out of it, which is what every other
+  // command needs. A scheduled run reads it from the exit code, so a dead
+  // credential cannot be mistaken for a healthy one.
   async function status(clientId) {
     const report = {
+      ok: false,
       base_url: settings.baseUrl,
       api_client_id: maskIdentity(settings.apiClientId),
       api_client_secret: settings.apiClientSecret ? "configured" : "missing",
@@ -863,6 +960,7 @@ export function createClient({
       const resolved = await resolveClientId(clientId);
       report.client_id = resolved.id;
       report.client_source = resolved.source;
+      report.ok = true;
     } catch (error) {
       report.client_id = `not selected: ${scrub(error.message, credentials)}`;
     }
@@ -1010,7 +1108,10 @@ Reads a FreeFinance (API v2) client. Output is JSON. Credentials come from the
 environment: FREEFINANCE_API_CLIENT_ID and FREEFINANCE_API_CLIENT_SECRET.
 
 Commands:
-  status                            Masked identity and a token check (no secrets)
+  status                            Masked identity and a token check (no secrets).
+                                    Prints "ok": true and exits 0 only when the
+                                    credentials work and a Mandant was resolved;
+                                    otherwise it prints the same report and exits 1
   clients                           List the clients (Mandanten) this user can see
   payment-accounts                  List payment accounts [--visible true|false]
   bank-statements                   List bank statement headers
@@ -1084,9 +1185,13 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     const mandant = async () => (await client.resolveClientId(clientFlag)).id;
 
     switch (command) {
-      case "status":
-        out(await client.status(clientFlag));
-        return 0;
+      case "status": {
+        // The report always prints, on stdout, whether or not it is healthy;
+        // only the exit code differs, so a schedule can act on it.
+        const report = await client.status(clientFlag);
+        out(report);
+        return report.ok ? 0 : 1;
+      }
       case "clients":
         out(await client.list(clientsPath, options));
         return 0;

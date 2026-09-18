@@ -12,7 +12,10 @@ import {
   bankStatementLinesPath,
   bankStatementsPath,
   buildApiUrl,
+  buildStagingBody,
   createClient,
+  stagingBoundary,
+  stagingFileName,
   incomingInvoicesPath,
   invoiceBookingsPath,
   issuerTokenUrl,
@@ -34,12 +37,16 @@ const CLIENT_ID = "12345";
 const OTHER_CLIENT_ID = "67890";
 const STATEMENT_UUID = "123e4567-e89b-12d3-a456-426614174000";
 const INVOICE_UUID = "123e4567-e89b-12d3-a456-426614174001";
+const LINE_UUID = "123e4567-e89b-12d3-a456-426614174002";
 // The issuer must sit on the API's registrable domain, so both fixtures share
 // example.test.
 const BASE_URL = "https://demo.example.test";
 const ISSUER_URL = "https://accounts.example.test/auth/realms/demo";
 const API_CLIENT_ID = "11111_222222222";
 const API_CLIENT_SECRET = "fake-secret-never-printed";
+// A fixed uuid so the multipart boundary is the same on every run.
+const BOUNDARY_UUID = "00000000-1111-2222-3333-444444444444";
+const BOUNDARY = `freefinance-${BOUNDARY_UUID}`;
 
 function fakeEnv(overrides = {}) {
   return {
@@ -93,6 +100,7 @@ async function runMain(argv, { env = fakeEnv(), fetch, cwd } = {}) {
     fetch,
     cwd: cwd ?? (await emptyDir()),
     sleep: async () => {},
+    uuid: () => BOUNDARY_UUID,
     stdout: (text) => stdout.push(text),
     stderr: (text) => stderr.push(text),
   });
@@ -222,7 +230,11 @@ test("accepts only the supported staging file types", () => {
   assert.equal(mimeTypeFor("invoice.xml"), "application/xml");
   assert.equal(mimeTypeFor("scan.jpeg"), "image/jpeg");
   assert.equal(mimeTypeFor("invoice.exe"), null);
-  assert.equal(MAX_STAGING_BYTES, 2_097_152);
+  // FreeFinance documents "a maximum size of 2 MB", so the ceiling is decimal.
+  // At 2 MiB a file between these two numbers passed the dry run and then
+  // failed on the confirmed upload, which is the request the user approved.
+  assert.equal(MAX_STAGING_BYTES, 2_000_000);
+  assert.ok(MAX_STAGING_BYTES < 2_097_152);
 });
 
 test("masks the technical user id to its last four characters and never expands short values", () => {
@@ -303,6 +315,121 @@ test("write policy allows only a POST to the DMS staging folder", () => {
       }),
     /Unsafe/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The staging multipart body
+// ---------------------------------------------------------------------------
+
+// FreeFinance takes the stored file name from the first attachment's
+// Content-Disposition. Node's FormData names a Blob part "blob" when no
+// filename is given, which made the metadata part the first attachment and
+// would have stored the document as "blob".
+test("the metadata part carries no filename, so the attachment names the file", () => {
+  const { body, contentType } = buildStagingBody({
+    fileName: "receipt.pdf",
+    contentType: "application/pdf",
+    bytes: Buffer.from("%PDF"),
+    metadata: { description: "Example receipt", skip_ocr: true },
+    boundary: BOUNDARY,
+  });
+  const text = body.toString("utf8");
+  assert.equal(contentType, `multipart/form-data; boundary=${BOUNDARY}`);
+  assert.ok(text.includes('Content-Disposition: form-data; name="metadata"\r\n'));
+  assert.ok(!/name="metadata"[^\r\n]*filename/.test(text));
+  assert.deepEqual(text.match(/filename="[^"]*"/g), ['filename="receipt.pdf"']);
+  // Order matters only in that the sole attachment is the document itself.
+  assert.ok(text.indexOf('name="metadata"') < text.indexOf('name="content"'));
+  assert.equal(
+    text,
+    [
+      `--${BOUNDARY}`,
+      'Content-Disposition: form-data; name="metadata"',
+      "Content-Type: application/json",
+      "",
+      '{"description":"Example receipt","skip_ocr":true}',
+      `--${BOUNDARY}`,
+      'Content-Disposition: form-data; name="content"; filename="receipt.pdf"',
+      "Content-Type: application/pdf",
+      "",
+      "%PDF",
+      `--${BOUNDARY}--`,
+      "",
+    ].join("\r\n"),
+  );
+});
+
+test("without metadata the body is the attachment alone", () => {
+  const { body } = buildStagingBody({
+    fileName: "scan.jpg",
+    contentType: "image/jpeg",
+    bytes: Buffer.from("jpeg"),
+    metadata: {},
+    boundary: BOUNDARY,
+  });
+  const text = body.toString("utf8");
+  assert.ok(!text.includes('name="metadata"'));
+  assert.equal(text.split(`--${BOUNDARY}`).length - 1, 2, "one part plus the closing line");
+});
+
+test("binary bytes reach the body untouched", () => {
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+  const { body } = buildStagingBody({
+    fileName: "shot.png",
+    contentType: "image/png",
+    bytes,
+    boundary: BOUNDARY,
+  });
+  const header = Buffer.from(
+    `Content-Type: image/png\r\n\r\n`,
+    "utf8",
+  );
+  const start = body.indexOf(header) + header.length;
+  assert.deepEqual(body.subarray(start, start + bytes.length), bytes);
+});
+
+test("a file name or boundary that could rewrite the request is refused", () => {
+  assert.throws(
+    () =>
+      buildStagingBody({
+        fileName: 'in"voice.pdf',
+        contentType: "application/pdf",
+        bytes: Buffer.from("%PDF"),
+        boundary: BOUNDARY,
+      }),
+    /must not be empty or contain a quote/,
+  );
+  assert.throws(() => stagingFileName("a\r\nb.pdf"), /line break/);
+  assert.throws(() => stagingFileName(""), /must not be empty/);
+  assert.equal(stagingFileName("Rechnung 2026-01.pdf"), "Rechnung 2026-01.pdf");
+  assert.throws(
+    () =>
+      buildStagingBody({
+        fileName: "receipt.pdf",
+        contentType: "application/pdf",
+        bytes: Buffer.from("%PDF"),
+        boundary: 'bad boundary"',
+      }),
+    /boundary contains unexpected characters/,
+  );
+  assert.throws(
+    () =>
+      buildStagingBody({
+        fileName: "receipt.pdf",
+        contentType: "application/pdf",
+        bytes: Buffer.from(`ends with ${BOUNDARY} inside`),
+        boundary: BOUNDARY,
+      }),
+    /boundary collides/,
+  );
+});
+
+test("the generated boundary is header-safe and different every time", () => {
+  const first = stagingBoundary();
+  const second = stagingBoundary();
+  assert.match(first, /^freefinance-[0-9a-f-]{36}$/);
+  assert.notEqual(first, second);
+  assert.equal(stagingBoundary(() => BOUNDARY_UUID), BOUNDARY);
 });
 
 // ---------------------------------------------------------------------------
@@ -422,20 +549,38 @@ test("bank-statements maps --since and --until to from and to", async () => {
   assert.equal(fetch.apiCalls().length, 1);
 });
 
-test("bank-statement-lines filters by line type NEW", async () => {
+// line_type is a request filter and nothing more: the API's bank statement
+// line carries no such property, so the filter is the only way to know which
+// lines are still NEW. The fixture matches the documented response shape.
+test("bank-statement-lines filters by line type NEW, which the answer does not repeat", async () => {
   const fetch = fakeFetch((apiPath) => {
     assert.equal(
       apiPath,
       `/clients/${CLIENT_ID}/bsl/bank_statements/${STATEMENT_UUID}/lines?limit=500&line_type=NEW`,
     );
-    return jsonResponse({ content: [{ line_type: "NEW" }], total_count: 1 });
+    return jsonResponse({
+      content: [
+        {
+          id: LINE_UUID,
+          line_number: 1,
+          state: "ACTIVE",
+          booking_date: "2026-03-01",
+          value_date: "2026-03-01",
+          amount: "-1500.00",
+          currency_code: "EUR",
+        },
+      ],
+      total_count: 1,
+    });
   });
   const { code, stdout } = await runMain(
     ["bank-statement-lines", STATEMENT_UUID, "--client", CLIENT_ID, "--line-type", "NEW"],
     { fetch },
   );
   assert.equal(code, 0);
-  assert.equal(JSON.parse(stdout).content[0].line_type, "NEW");
+  const line = JSON.parse(stdout).content[0];
+  assert.equal(line.state, "ACTIVE");
+  assert.equal(line.line_type, undefined);
 });
 
 test("income-journals passes --search, incoming-invoices passes --paid-state", async () => {
@@ -659,14 +804,30 @@ test("upload-staging --confirm lists staging then POSTs a multipart body", async
   assert.equal(api[0].options.method, "GET");
   assert.equal(api[1].url, `${BASE_URL}/api/2.0/clients/${CLIENT_ID}/doc/providers/DMS/staging`);
   assert.equal(api[1].options.method, "POST");
-  const body = api[1].options.body;
-  assert.ok(body instanceof FormData);
-  const content = body.get("content");
-  assert.equal(content.name, "receipt.pdf");
-  assert.equal(content.type, "application/pdf");
-  assert.deepEqual(JSON.parse(await body.get("metadata").text()), {
-    description: "Example receipt",
-  });
+  assert.equal(
+    api[1].options.headers["Content-Type"],
+    `multipart/form-data; boundary=${BOUNDARY}`,
+  );
+  // Byte for byte the request FreeFinance documents: the JSON payload first
+  // with no filename, then the one attachment whose Content-Disposition
+  // filename is the name the document is stored under.
+  assert.equal(
+    Buffer.from(api[1].options.body).toString("utf8"),
+    [
+      `--${BOUNDARY}`,
+      'Content-Disposition: form-data; name="metadata"',
+      "Content-Type: application/json",
+      "",
+      '{"description":"Example receipt"}',
+      `--${BOUNDARY}`,
+      'Content-Disposition: form-data; name="content"; filename="receipt.pdf"',
+      "Content-Type: application/pdf",
+      "",
+      "%PDF-1.4 fake",
+      `--${BOUNDARY}--`,
+      "",
+    ].join("\r\n"),
+  );
 });
 
 test("upload-staging refuses duplicates, oversized files, unsupported types and files outside the workspace", async () => {
@@ -684,7 +845,17 @@ test("upload-staging refuses duplicates, oversized files, unsupported types and 
   const big = await writeFixture("big.pdf", Buffer.alloc(3 * 1024 * 1024));
   const oversized = await runMain(["upload-staging", "--file", "big.pdf"], { fetch, cwd: big.dir });
   assert.equal(oversized.code, 1);
-  assert.match(oversized.stderr, /limited to 2 MiB/);
+  assert.match(oversized.stderr, /limited to 2 MB/);
+
+  // The gap that the 2 MiB ceiling used to wave through: over FreeFinance's
+  // 2 MB but under 2 MiB. The dry run has to refuse what the API would refuse.
+  const between = await writeFixture("between.pdf", Buffer.alloc(2_050_000));
+  const betweenRun = await runMain(["upload-staging", "--file", "between.pdf"], {
+    fetch,
+    cwd: between.dir,
+  });
+  assert.equal(betweenRun.code, 1);
+  assert.match(betweenRun.stderr, /limited to 2 MB/);
 
   const exe = await writeFixture("tool.exe", Buffer.from("MZ"));
   const unsupported = await runMain(["upload-staging", "--file", "tool.exe"], { fetch, cwd: exe.dir });
@@ -741,6 +912,7 @@ test("status masks the id, reports the secret as configured, and prints neither"
   const { code, stdout } = await runMain(["status"], { fetch });
   assert.equal(code, 0);
   const report = JSON.parse(stdout);
+  assert.equal(report.ok, true);
   assert.equal(report.base_url, BASE_URL);
   assert.equal(report.api_client_id, "...2222");
   assert.equal(report.api_client_secret, "configured");
@@ -773,26 +945,48 @@ test("a token endpoint error that echoes a credential is scrubbed from stdout an
   assert.ok(!listing.stderr.includes(API_CLIENT_ID));
   assert.equal(listing.stdout, "");
 
+  // A dead credential must not look healthy to a schedule: the report still
+  // prints, on stdout, and the exit code carries the verdict.
   const status = await runMain(["status"], { fetch: rejecting });
-  assert.equal(status.code, 0);
+  assert.equal(status.code, 1);
   const report = JSON.parse(status.stdout);
+  assert.equal(report.ok, false);
   assert.match(report.token, /failed \(401\): bad client \*\*\* with \*\*\*/);
   assert.ok(!status.stdout.includes(API_CLIENT_SECRET));
   assert.ok(!status.stdout.includes(API_CLIENT_ID));
 });
 
-test("status without credentials reports missing and skips the token check", async () => {
+test("status without credentials reports missing, exits 1 and skips the token check", async () => {
   const fetch = fakeFetch(() => jsonResponse({}));
   const { code, stdout } = await runMain(["status"], {
     fetch,
     env: fakeEnv({ FREEFINANCE_API_CLIENT_ID: "", FREEFINANCE_API_CLIENT_SECRET: "" }),
   });
-  assert.equal(code, 0);
+  assert.equal(code, 1);
   const report = JSON.parse(stdout);
+  assert.equal(report.ok, false);
   assert.equal(report.api_client_id, "missing");
   assert.equal(report.api_client_secret, "missing");
   assert.match(report.token, /skipped/);
   assert.equal(fetch.calls.length, 0);
+});
+
+test("status exits 1 when the token works but no Mandant can be chosen", async () => {
+  const fetch = fakeFetch(() =>
+    jsonResponse({
+      content: [
+        { id: 12345, display_name: "Example Company" },
+        { id: 67890, display_name: "Second Example" },
+      ],
+      total_count: 2,
+    }),
+  );
+  const { code, stdout } = await runMain(["status"], { fetch });
+  assert.equal(code, 1);
+  const report = JSON.parse(stdout);
+  assert.equal(report.ok, false);
+  assert.equal(report.token, "ok");
+  assert.match(report.client_id, /not selected: Several FreeFinance clients/);
 });
 
 // ---------------------------------------------------------------------------

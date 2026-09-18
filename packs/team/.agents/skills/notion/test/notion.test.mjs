@@ -11,6 +11,8 @@ import {
   MAX_RETRY_DELAY_MS,
   MIN_REQUEST_INTERVAL_MS,
   NOTION_VERSION,
+  READ_ONLY_RETRY_STATUSES,
+  UNAPPLIED_STATUSES,
   classifyRequest,
   createClient,
   createRateLimiter,
@@ -275,6 +277,40 @@ test("retry delay honours Retry-After, caps it, and backs off otherwise", () => 
   assert.equal(retryDelayMs(none, 1, () => 0.5), 2125);
 });
 
+// Notion's Retry-After is the time until the rate limit window resets, so the
+// API can ask for up to 60 seconds. A lower ceiling turned a wait Notion asked
+// for into a hard failure.
+// Notion has two rate limits. A per-connection 429 asks for at most 60 seconds,
+// but the workspace-wide limit shared by every connection "can be longer than a
+// minute" (developers.notion.com/reference/request-limits, read 2026-09-18). A
+// 60 second ceiling truncated that wait, so the client retried while still
+// limited and burned every attempt.
+test("the retry ceiling honours a workspace-wide wait longer than a minute", () => {
+  assert.equal(MAX_RETRY_DELAY_MS, 300_000);
+  const perConnection = new Response("", { status: 429, headers: { "Retry-After": "60" } });
+  assert.equal(retryDelayMs(perConnection, 0), 60_000);
+  // The case that used to be silently cut down to 60s.
+  const workspaceWide = new Response("", { status: 429, headers: { "Retry-After": "180" } });
+  assert.equal(retryDelayMs(workspaceWide, 0), 180_000);
+  const beyondCeiling = new Response("", { status: 429, headers: { "Retry-After": "600" } });
+  assert.equal(retryDelayMs(beyondCeiling, 0), 300_000);
+});
+
+// Per-connection 429s repeat the wait in the body for clients that cannot read
+// headers. Same page, same date.
+test("the retry wait falls back to additional_data.retry_after in the body", () => {
+  const noHeader = new Response("", { status: 429 });
+  assert.equal(retryDelayMs(noHeader, 0, () => 0, { additional_data: { retry_after: "45" } }), 45_000);
+  // The header still wins when both are present.
+  const withHeader = new Response("", { status: 429, headers: { "Retry-After": "10" } });
+  assert.equal(
+    retryDelayMs(withHeader, 0, () => 0, { additional_data: { retry_after: "45" } }),
+    10_000,
+  );
+  // A body without the field falls through to exponential backoff.
+  assert.equal(retryDelayMs(noHeader, 0, () => 0, { code: "rate_limited" }), 1000);
+});
+
 // ---------------------------------------------------------------------------
 // HTTP layer
 // ---------------------------------------------------------------------------
@@ -395,6 +431,80 @@ test("retries are bounded: repeated 429s surface the error without the token", a
   assert.equal(fetch.calls.length, MAX_RETRIES + 1);
 });
 
+// Notion's remedy for a 409 conflict_error is "Make sure the parameters are up
+// to date and try again" (developers.notion.com/reference/status-codes, read
+// 2026-09-18). It never promises a rollback, so 409 is a read-only retry: only
+// 429 is safe to resend on a write.
+test("a 409 conflict is retried on a read and then succeeds", async () => {
+  assert.deepEqual([...UNAPPLIED_STATUSES], [429]);
+  assert.deepEqual([...READ_ONLY_RETRY_STATUSES], [409]);
+  const fetch = fakeFetch((call, calls) =>
+    calls.length === 1
+      ? jsonResponse(
+          { code: "conflict_error", message: "Conflict occurred while saving" },
+          409,
+        )
+      : jsonResponse({ object: "page", id: PAGE_ID }),
+  );
+  const { client, clock } = clientWith(fetch);
+  const result = await client.page(PAGE_ID);
+  assert.equal(result.id, PAGE_ID);
+  assert.equal(fetch.calls.length, 2);
+  assert.ok(clock.sleeps.includes(1000));
+});
+
+// A confirmed append that answers 409 must NOT be resent. Notion documents no
+// rollback, and it returns 409 in a second case where the content was already
+// taken ("our File Upload third-party data storage provider has downtime"), so
+// a resend risks the same blocks landing on the user's page twice.
+test("a 409 on a confirmed write surfaces and is never resent", async () => {
+  const conflicting = fakeFetch(() =>
+    jsonResponse({ code: "conflict_error", message: "Conflict occurred" }, 409),
+  );
+  const { client } = clientWith(conflicting);
+  await assert.rejects(
+    () => client.append(PAGE_ID, { text: "Hello there", confirm: true }),
+    (error) => {
+      assert.match(error.message, /failed \(409\): conflict_error/);
+      assert.equal(error.status, 409);
+      return true;
+    },
+  );
+  // Exactly one attempt: the write was sent once and never repeated.
+  assert.equal(conflicting.calls.length, 1);
+  assert.equal(conflicting.calls[0].method, "PATCH");
+});
+
+// The contrast that makes the rule legible: the same 429 IS resent on a write,
+// because Notion refuses a rate-limited request before doing any work.
+test("a 429 on a confirmed write is resent, unlike a 409", async () => {
+  const limited = fakeFetch((call, calls) =>
+    calls.length === 1
+      ? jsonResponse({ code: "rate_limited", message: "slow down" }, 429, {
+          "Retry-After": "1",
+        })
+      : jsonResponse({ object: "list", results: [{ id: "new-block" }] }),
+  );
+  const { client } = clientWith(limited);
+  const result = await client.append(PAGE_ID, { text: "Hello there", confirm: true });
+  assert.equal(result.result.results[0].id, "new-block");
+  assert.equal(limited.calls.length, 2);
+  assert.equal(limited.calls[1].method, "PATCH");
+});
+
+test("repeated 409s stop at the retry ceiling and name the conflict", async () => {
+  const fetch = fakeFetch(() =>
+    jsonResponse({ code: "conflict_error", message: "Conflict occurred" }, 409),
+  );
+  const { client } = clientWith(fetch);
+  await assert.rejects(() => client.page(PAGE_ID), (error) => {
+    assert.match(error.message, /failed \(409\): conflict_error/);
+    assert.equal(error.status, 409);
+    return true;
+  });
+  assert.equal(fetch.calls.length, MAX_RETRIES + 1);
+});
+
 test("5xx answers back off with jitter and 4xx answers are not retried", async () => {
   const flaky = fakeFetch((call, calls) =>
     calls.length === 1
@@ -480,9 +590,12 @@ test("status scrubs the token from a failed connection on stdout", async () => {
     jsonResponse({ code: "unauthorized", message: `bad token ${API_KEY}` }, 401),
   );
   const result = await runMain(["status"], { fetch });
-  assert.equal(result.code, 0, result.stderr);
+  // The report still prints in full; only the exit code says it is unhealthy,
+  // so a scheduled check can act on a revoked token.
+  assert.equal(result.code, 1, result.stderr);
   const report = JSON.parse(result.stdout);
   assert.equal(report.api_key, "configured");
+  assert.equal(report.ok, false);
   assert.match(report.connection, /failed \(401\): unauthorized: bad token \*\*\*/);
   assert.ok(!result.stdout.includes(API_KEY));
   assert.ok(!result.stderr.includes(API_KEY));
@@ -491,9 +604,11 @@ test("status scrubs the token from a failed connection on stdout", async () => {
 test("status without a token reports missing and makes no request", async () => {
   const fetch = fakeFetch(() => jsonResponse({}));
   const result = await runMain(["status"], { env: {}, fetch });
-  assert.equal(result.code, 0);
+  // No token is an unhealthy connection, not a healthy one with a note.
+  assert.equal(result.code, 1);
   const report = JSON.parse(result.stdout);
   assert.equal(report.api_key, "missing");
+  assert.equal(report.ok, false);
   assert.match(report.connection, /NOTION_API_KEY missing/);
   assert.equal(fetch.calls.length, 0);
 });
@@ -574,6 +689,95 @@ test("query with several data sources asks for --data-source, which skips resolu
   const last = fetch.calls.at(-1);
   assert.equal(last.path, `/data_sources/${OTHER_DATA_SOURCE_ID}/query`);
   assert.equal(fetch.calls.length, 2);
+});
+
+// Search returns the data source's id, not the database's, so the id the
+// Getting started flow records is a data source id. Querying with it used to
+// hit GET /databases/<data source id>, 404, and be reported as a sharing gap.
+test("query accepts the data source id that search returns", async () => {
+  const fetch = fakeFetch((call) => {
+    if (call.path === `/databases/${DATA_SOURCE_ID}`) {
+      return jsonResponse(
+        { object: "error", code: "object_not_found", message: "Could not find database" },
+        404,
+      );
+    }
+    if (call.path === `/data_sources/${DATA_SOURCE_ID}`) {
+      return jsonResponse({ object: "data_source", id: DATA_SOURCE_ID, properties: {} });
+    }
+    return jsonResponse({ object: "list", results: [{ id: "row" }], has_more: false });
+  });
+  const result = await runMain(["query", DATA_SOURCE_ID], { fetch });
+  assert.equal(result.code, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.data_source_id, DATA_SOURCE_ID);
+  assert.equal(output.data_source_source, "data_source");
+  assert.equal(output.results[0].id, "row");
+  assert.equal(fetch.calls.at(-1).method, "POST");
+  assert.equal(fetch.calls.at(-1).path, `/data_sources/${DATA_SOURCE_ID}/query`);
+});
+
+test("--data-source with the id search returned costs no extra lookup", async () => {
+  const fetch = fakeFetch(() => jsonResponse({ object: "list", results: [], has_more: false }));
+  const result = await runMain(
+    ["query", DATABASE_ID, "--data-source", DATA_SOURCE_ID],
+    { fetch },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).data_source_source, "flag");
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(fetch.calls[0].path, `/data_sources/${DATA_SOURCE_ID}/query`);
+});
+
+test("create-page under a database takes a data source id as the parent", async () => {
+  const fetch = fakeFetch((call) => {
+    if (call.path === `/databases/${DATA_SOURCE_ID}`) {
+      return jsonResponse({ object: "error", code: "object_not_found" }, 404);
+    }
+    if (call.path === `/data_sources/${DATA_SOURCE_ID}`) {
+      return jsonResponse({ object: "data_source", id: DATA_SOURCE_ID });
+    }
+    return jsonResponse({ object: "page", id: "created-row" });
+  });
+  const dry = await runMain(
+    ["create-page", "--parent", DATA_SOURCE_ID, "--parent-type", "database", "--title", "Row"],
+    { fetch },
+  );
+  assert.equal(dry.code, 0, dry.stderr);
+  const plan = JSON.parse(dry.stdout);
+  assert.equal(plan.data_source_id, DATA_SOURCE_ID);
+  assert.deepEqual(plan.request.body.parent, {
+    type: "data_source_id",
+    data_source_id: DATA_SOURCE_ID,
+  });
+});
+
+test("an id that is neither kind says so instead of blaming sharing alone", async () => {
+  const fetch = fakeFetch(() =>
+    jsonResponse({ object: "error", code: "object_not_found", message: "Could not find" }, 404),
+  );
+  const result = await runMain(["query", DATABASE_ID], { fetch });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Neither a database nor a data source with id/);
+  assert.match(result.stderr, /compare it with what `search` returned/);
+  assert.match(result.stderr, /has not been given access to it yet/);
+  // The message rules out the mix-up it used to be blamed on, so the reader
+  // is not sent to check the wrong thing.
+  assert.match(result.stderr, /Both kinds of id were tried/);
+  assert.deepEqual(
+    fetch.calls.map((call) => call.path),
+    [`/databases/${DATABASE_ID}`, `/data_sources/${DATABASE_ID}`],
+  );
+});
+
+test("a 403 while resolving is not retried as the other kind of id", async () => {
+  const fetch = fakeFetch(() =>
+    jsonResponse({ object: "error", code: "restricted_resource", message: "no access" }, 403),
+  );
+  const result = await runMain(["query", DATABASE_ID], { fetch });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /failed \(403\): restricted_resource/);
+  assert.equal(fetch.calls.length, 1);
 });
 
 test("validation errors exit 1 before any request", async () => {
@@ -795,4 +999,37 @@ test("--compact prints one line", async () => {
   const result = await runMain(["me", "--compact"], { fetch });
   assert.equal(result.code, 0);
   assert.equal(result.stdout, '{"object":"user","id":"bot"}');
+});
+
+test("status says whether the connection is healthy, and the exit code follows", async () => {
+  // A revoked token must not read as a healthy one. The report prints either
+  // way; `ok` is what the command's exit code is derived from, so a scheduled
+  // check can act on it.
+  const healthy = fakeFetch(() =>
+    jsonResponse({ object: "user", id: "bot-1", name: "Instafy", bot: { workspace_name: "Forma" } }),
+  );
+  const good = await runMain(["status"], { fetch: healthy });
+  assert.equal(good.code, 0, good.stderr);
+  const goodReport = JSON.parse(good.stdout);
+  assert.equal(goodReport.connection, "ok");
+  assert.equal(goodReport.ok, true);
+  assert.equal(goodReport.bot.workspace_name, "Forma");
+
+  const revoked = fakeFetch(() =>
+    jsonResponse({ object: "error", code: "unauthorized", message: "API token is invalid." }, 401),
+  );
+  const bad = await runMain(["status"], { fetch: revoked });
+  assert.equal(bad.code, 1);
+  const badReport = JSON.parse(bad.stdout);
+  assert.match(badReport.connection, /^failed: /);
+  assert.equal(badReport.ok, false);
+
+  const withoutKey = await runMain(["status"], {
+    env: { ...fakeEnv(), NOTION_API_KEY: "" },
+    fetch: fakeFetch(() => jsonResponse({})),
+  });
+  assert.equal(withoutKey.code, 1);
+  const noKeyReport = JSON.parse(withoutKey.stdout);
+  assert.equal(noKeyReport.connection, "skipped: NOTION_API_KEY missing");
+  assert.equal(noKeyReport.ok, false);
 });

@@ -2,7 +2,7 @@
 // Notion API client for the notion skill.
 //
 // Zero dependencies, Node 24, ESM. The token comes from the environment only:
-//   NOTION_API_KEY   internal integration token (sensitive)
+//   NOTION_API_KEY   internal connection token (sensitive)
 //
 // Every command is a read except `append --confirm` and `create-page --confirm`,
 // the two allowed writes. The request policy is enforced in one place
@@ -26,11 +26,30 @@ export const MAX_ALL_PAGES = 20;
 export const MAX_REQUESTS_PER_SECOND = 3;
 export const MIN_REQUEST_INTERVAL_MS = Math.ceil(1000 / MAX_REQUESTS_PER_SECOND);
 export const MAX_RETRIES = 3;
-export const MAX_RETRY_DELAY_MS = 30_000;
+// Notion documents two rate limits (developers.notion.com/reference/request-limits,
+// read 2026-09-18). The per-connection one resets within its 60-second window,
+// so its Retry-After "is at most 60 seconds". The per-workspace one is shared
+// across every connection in the workspace and its "Retry-After for this limit
+// can be longer than a minute". A 60-second ceiling therefore truncated a wait
+// the API asked for, retried while still limited, and burned every attempt.
+export const MAX_RETRY_DELAY_MS = 300_000;
 export const MAX_RICH_TEXT_CHARS = 2000;
 export const MAX_BLOCKS_PER_REQUEST = 100;
 export const MAX_TEXT_BYTES = 100 * 1024;
 export const MAX_TITLE_CHARS = 2000;
+
+// 429 is the one status Notion refuses before doing any work, so a 429 may be
+// resent as it stands, a write included.
+export const UNAPPLIED_STATUSES = new Set([429]);
+
+// Notion's remedy for a 409 conflict_error is "Make sure the parameters are up
+// to date and try again" (developers.notion.com/reference/status-codes, read
+// 2026-09-18). It does NOT promise the transaction was rolled back, and it
+// names a second cause: a file-upload storage provider that already took the
+// content. So a 409 is resent only for reads, exactly as a 5xx is, and a
+// confirmed write that answers 409 surfaces instead of risking duplicate
+// blocks on the user's page.
+export const READ_ONLY_RETRY_STATUSES = new Set([409]);
 
 const HEX_ID = /^[0-9a-f]{32}$/;
 const ID_IN_PATH = /[0-9a-f]{32}(?![0-9a-f])/gi;
@@ -292,11 +311,19 @@ export function createRateLimiter({
   };
 }
 
-export function retryDelayMs(response, attempt, random = Math.random) {
+export function retryDelayMs(response, attempt, random = Math.random, body = null) {
   const header = response?.headers?.get?.("retry-after");
   const seconds = Number(header);
   if (header !== null && header !== undefined && Number.isFinite(seconds) && seconds >= 0) {
     return Math.min(Math.ceil(seconds * 1000), MAX_RETRY_DELAY_MS);
+  }
+  // Per-connection 429s repeat the same wait in the body as
+  // `additional_data.retry_after`, an integer number of seconds sent as a
+  // string, for clients that cannot read response headers
+  // (developers.notion.com/reference/request-limits, read 2026-09-18).
+  const fromBody = Number(body?.additional_data?.retry_after);
+  if (Number.isFinite(fromBody) && fromBody >= 0) {
+    return Math.min(Math.ceil(fromBody * 1000), MAX_RETRY_DELAY_MS);
   }
   const base = 1000 * 2 ** attempt;
   const jitter = Math.floor(random() * 250);
@@ -389,13 +416,16 @@ export function createClient({
       }
       if (response.ok) return parsed;
 
-      // A 429 was not processed, so any request may be resent. A 5xx may
-      // have been applied before the answer was lost, so only reads are
-      // resent; a failed write surfaces at once and is never repeated.
+      // A 429 was refused before any work, so any request may be resent. A 409
+      // or a 5xx may already have been applied before the answer was lost, so
+      // only reads are resent; a failed write surfaces at once and is never
+      // repeated, because a repeated append would duplicate blocks.
       const retryable =
-        response.status === 429 || (response.status >= 500 && kind === "read");
+        UNAPPLIED_STATUSES.has(response.status) ||
+        ((READ_ONLY_RETRY_STATUSES.has(response.status) || response.status >= 500) &&
+          kind === "read");
       if (retryable && attempt < MAX_RETRIES) {
-        await sleep(retryDelayMs(response, attempt, random));
+        await sleep(retryDelayMs(response, attempt, random, parsed));
         continue;
       }
       const error = new Error(
@@ -437,12 +467,15 @@ export function createClient({
   }
 
   async function status() {
+    // `ok` is what a scheduled check acts on: the report always prints, and only
+    // the exit code differs, so a revoked token cannot read as a healthy one.
     const report = {
       api_base_url: settings.baseUrl,
       notion_version: settings.version,
       api_key: maskToken(settings.apiKey),
       connection: null,
       bot: null,
+      ok: false,
     };
     if (!settings.apiKey) {
       report.connection = "skipped: NOTION_API_KEY missing";
@@ -451,6 +484,7 @@ export function createClient({
     try {
       const user = await me();
       report.connection = "ok";
+      report.ok = true;
       report.bot = {
         id: user?.id ?? null,
         name: user?.name ?? null,
@@ -502,12 +536,32 @@ export function createClient({
     return apiRequest(`/data_sources/${notionId(id, "Data source ID")}`);
   }
 
-  // A database holds one or more data sources (tables). Most hold exactly one.
-  async function resolveDataSource(databaseId, explicit = null) {
+  // A database holds one or more data sources (tables); most hold exactly one.
+  // The id in hand may be either kind and the two are not interchangeable: a
+  // notion.so link carries the database's id, while `search` returns the data
+  // source's id. So a database id is read first and resolved through its
+  // `data_sources` list, and an id that is not a database is tried as a data
+  // source before anything is blamed on sharing.
+  async function resolveDataSource(id, explicit = null) {
     if (explicit !== null && explicit !== undefined) {
       return { id: notionId(explicit, "Data source ID"), source: "flag" };
     }
-    const found = await database(databaseId);
+    const wanted = notionId(id, "Database or data source ID");
+    let found;
+    try {
+      found = await database(wanted);
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      try {
+        await dataSource(wanted);
+      } catch (retry) {
+        if (retry.status !== 404) throw retry;
+        throw new Error(
+          `Neither a database nor a data source with id ${wanted} is visible to this connection. Both kinds of id were tried, so this is not a database-versus-data-source mix-up. Either the id is not one from this workspace (compare it with what \`search\` returned), or the connection has not been given access to it yet: open it in Notion, choose the \`...\` menu, then Connections, then add the connection.`,
+        );
+      }
+      return { id: wanted, source: "data_source" };
+    }
     const sources = Array.isArray(found?.data_sources) ? found.data_sources : [];
     if (sources.length === 1) {
       return { id: notionId(sources[0].id, "Data source ID"), source: "database" };
@@ -523,7 +577,10 @@ export function createClient({
     );
   }
 
+  // The positional id may be a database id or a data source id; see
+  // resolveDataSource.
   async function query(databaseId, { dataSource: explicit, filter, sorts, all = false, cursor, size } = {}) {
+    const target = notionId(databaseId, "Database or data source ID");
     const filterBody = parseJsonObject(filter, "--filter-json");
     let sortsBody = null;
     if (sorts !== undefined) {
@@ -535,7 +592,7 @@ export function createClient({
       if (!Array.isArray(sortsBody)) throw new Error("--sorts-json must be a JSON array.");
     }
     const limit = pageSize(size);
-    const resolved = await resolveDataSource(notionId(databaseId, "Database ID"), explicit);
+    const resolved = await resolveDataSource(target, explicit);
     const result = await paginate(
       (start) => {
         const body = { page_size: limit };
@@ -702,7 +759,7 @@ const COMMANDS = {
   database: { positional: "database id", flags: {} },
   "data-source": { positional: "data source id", flags: {} },
   query: {
-    positional: "database id",
+    positional: "database or data source id",
     flags: {
       ...PAGINATION_FLAGS,
       "--data-source": { key: "dataSource" },
@@ -754,10 +811,10 @@ export function helpText() {
 
 Reads a Notion workspace through the public API (Notion-Version ${NOTION_VERSION}).
 Output is JSON. The token comes from the environment: NOTION_API_KEY. Only pages
-and databases connected to the integration are visible.
+and databases the connection has been given access to are visible.
 
 Commands:
-  me                                The integration's bot user
+  me                                The connection's bot user
   status                            Masked token check and connection test (no secrets)
   search [query]                    Search connected pages and data sources
       [--object page|database] [--page-size 1..${MAX_PAGE_SIZE}] [--cursor <c>] [--all]
@@ -765,7 +822,8 @@ Commands:
   blocks <id>                       Children of a page or block [--page-size] [--cursor] [--all]
   database <id>                     A database and its data sources
   data-source <id>                  One data source and its property schema
-  query <database id>               Rows of a database [--filter-json <json>]
+  query <database or data source id>
+                                    Rows of a database [--filter-json <json>]
       [--sorts-json <json>] [--data-source <id>] [--page-size] [--cursor] [--all]
   append <page id>                  Dry run of appending blocks (a write)
       --text <text> | --text-file <path> [--confirm]
@@ -778,9 +836,18 @@ Global options:
   --compact               Print JSON on one line
 
 Ids are 32 hex characters with or without dashes; a notion.so link works too.
+A database contains data sources (the tables) and rows live in a data source.
+The two ids are not interchangeable: a notion.so link carries the database id,
+while search returns the data source id. query and create-page --parent-type
+database accept either and resolve the rest themselves.
 --all walks pages of results (at most ${MAX_ALL_PAGES}). Requests are limited to
-${MAX_REQUESTS_PER_SECOND} per second; 429 answers are retried at most ${MAX_RETRIES} times, 5xx answers
-only for reads. A failed write is never resent automatically.
+${MAX_REQUESTS_PER_SECOND} per second. A 429 is retried at most ${MAX_RETRIES} times, a write included, because
+Notion refused it before doing any work. A 409 or a 5xx is retried for reads
+only: Notion does not promise either was rolled back, so a confirmed write that
+answers 409 or 5xx surfaces at once rather than risk duplicate blocks. Check the
+page before running it again. Waits follow Retry-After (or the same wait in the
+body), capped at ${MAX_RETRY_DELAY_MS / 1000} seconds, because a workspace-wide 429 can ask for
+longer than a minute.
 Writes are refused without --confirm; the dry run prints the planned request.
 `;
 }
@@ -822,9 +889,13 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       case "me":
         out(await client.me());
         return 0;
-      case "status":
-        out(await client.status());
-        return 0;
+      case "status": {
+        // The report always prints, healthy or not; only the exit code differs,
+        // so a schedule can tell a revoked token from a working one.
+        const report = await client.status();
+        out(report);
+        return report.ok ? 0 : 1;
+      }
       case "search":
         out(await client.search({ query: positional[0] ?? "", ...options }));
         return 0;
