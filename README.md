@@ -28,6 +28,34 @@ Rules:
   runs `npm install --omit=dev --ignore-scripts` inside the skill folder.
 - Secrets are referenced by their exact Project Secret name, with what they are and where to
   get them, never a value.
+- The "What it is" cell opens with the provider's own on-screen name for the value, in the
+  provider's capitalisation, as the first noun phrase after the article. That phrase is what
+  a person reads in the provider's UI, so it is what the setup calls the value too.
+- The first sentence of the "What it is" cell, and the first sentence of the "Where the user
+  gets it" cell, must be safe to render verbatim beside an input: plain words, no links, no
+  markup, no backticks, no em dash, under 200 characters. Anything that needs formatting goes
+  in the sentences after it. An agent shows those first sentences to the person while setup
+  waits on the value, so a sentence written at the agent rather than at the person reads as
+  a leak.
+- A pack that asks for a human login credential (a password, a passphrase, a PIN, a card
+  number, a recovery phrase) will be refused by the product, so do not declare one. Ask for
+  the machine credential the provider issues instead.
+- The secrets table is read by the product, not only by the agent. Keep the header row
+  `| Name | Sensitive | What it is | Where the user gets it |`: the columns are matched by
+  their header text, so they may be reordered and "Where to get it" also reads, but a column
+  the reader does not recognise is one it ignores, and a row whose cell count does not match
+  the header is skipped whole.
+- Name cells hold the exact variable inside a code span. Sensitive cells open with `Yes` or
+  `No`; anything else is read as unsaid and the value is hidden by default.
+- Only the FIRST sentence of "What it is" and of "Where the user gets it" ever reaches a
+  person. A trailing clause carrying a link, a host or a code span is cut at the comma before
+  it, so "The Installation access token of an internal connection, starting with `ntn_`."
+  still reads; a first sentence that cannot be recovered that way is dropped entirely, and
+  the card falls back to its own wording. Later sentences are never promoted, so a
+  terminology footnote in sentence two cannot end up on a card.
+- Where-to-get first sentences are refused, not shortened, past 160 characters. Put the
+  screen the value sits on in that sentence, and the caveats, recovery steps and naming
+  disputes after it.
 - Per-skill caps: 256 files and 8 MiB.
 
 ## Packs
