@@ -264,8 +264,7 @@ Files:
   the Mandant works, and note any 401 or 403 as a permission gap in the Technischer
   Benutzer role rather than a wrong credential.
 
-Dependencies: none. Say that no `npm install` is needed because the client has zero
-dependencies.
+Dependencies: none.
 
 Schedule: one run named "FreeFinance weekly check", every week on the weekday and time from
 question 4 (default Monday at 08:00) in the user's timezone, quiet unless something needs a

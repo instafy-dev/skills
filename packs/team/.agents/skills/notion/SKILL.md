@@ -161,15 +161,15 @@ Needs:
   the user's Notion workspace, starting with `ntn_`. Capabilities: Read content and Insert
   content on, Update content off, and No user information chosen under user capabilities.
   The connection must then be given access to each page or database it should see,
-  otherwise search returns nothing. The walkthrough in question 1 has every step and the
-  names as they read on screen today.
+  otherwise search returns nothing: that is question 3, and it is a step of its own.
+  The walkthrough in question 1 has every step and the names as they read on screen today.
 The token must be present before any client command runs. Read it only from the
 environment. Never ask for the value in chat and never print it.
 
-Before asking anything, tell the user which files were installed (`SKILL.md`,
-`notion.mjs`, `test/`, `package.json`, `README.md`) and that this skill reads Notion and
-writes only by appending to a page or creating a page after an explicit confirmation. Do
-not run any script before the token is present.
+Before asking anything, tell the user that this skill reads their Notion and only ever
+writes by appending to a page or creating a page after they confirm. Say nothing about
+which files were installed: that is already recorded by the importer. Do not run any
+script before the token is present.
 
 Questions (ask one or two at a time and wait for the answer):
 
@@ -207,33 +207,48 @@ Questions (ask one or two at a time and wait for the answer):
      chat, and do not offer to hold it: it belongs in the environment under
      `NOTION_API_KEY` and nowhere else.
 
-   Once the token is present, run `node .agents/skills/notion/notion.mjs status` and show
-   the masked result: it prints `configured` or `missing`, never the token. `connection`
-   is the part that matters. With No user information chosen above, Notion may return the
-   bot name as `null` while the connection is perfectly healthy, so a missing name is not
-   a failure signal; only `connection` not being `ok` is. If it is not `ok`, say the token
-   is wrong or was revoked and ask for a replaced value in the environment.
+   Once the token is present, run the skill's `status` check and tell the user in one
+   sentence whether the connection is working. Do not show the command or its output: the
+   report is for you and the logs. It prints `configured` or `missing`, never the token,
+   and `connection` is the part that matters. With No user information chosen above,
+   Notion may return the bot name as `null` while the connection is perfectly healthy, so
+   a missing name is not a failure signal; only `connection` not being `ok` is. If it is
+   not `ok`, say in plain words that the token is wrong or was revoked and ask for a
+   replaced value.
 
 2. "Which pages or databases should I work with, and what for?" Suggest two roles: a
    running notes page where the agent appends what it did and learned, and optionally a
    database to watch for new rows (tasks, requests, meeting notes). The user may name more.
 
-3. For each page or database named, give the connection access and then agree on its id.
+3. Share each of those pages and databases with the connection, and wait until the user
+   says it is done. Do not search, read or record anything before this step: a brand new
+   connection has access to nothing at all, so a perfectly good token still finds nothing,
+   and nobody can tell from the outside which of the two is wrong.
 
-   Say: "Open it in Notion, choose the `...` menu, then Connections, then `+ Add
-   connection`, and pick the one you just made." A new connection sees nothing until this
-   is done, and child pages inherit it from their parent, so one top-level page often
-   covers a whole tree. The developer portal's Content access tab does the same job from
-   the other side, if the user prefers it.
+   Say, in these words, because this is what is on screen: "In Notion, open the page,
+   choose the `...` menu at the top right, then Connections, then `+ Add connection`, and
+   pick the connection you just made." If the user cannot find Connections, it may read as
+   `+ Add connections` or sit under Connect to on their version; ask what the menu shows
+   rather than insisting on one wording.
 
-   Then run `node .agents/skills/notion/notion.mjs search "<title>"` and read what came
-   back to the user by title and parent. An empty list means the page is not connected
-   yet: say so plainly and offer to wait rather than guessing an id. If several results
-   match, list them and ask which one is meant. Confirm every id with the user before
-   recording it.
+   Say plainly what the rule is: sharing is per page and per database, one at a time, and
+   nothing is shared by default. Child pages inherit the connection from their parent, so
+   sharing one top-level page often covers a whole tree, but a database that lives
+   elsewhere has to be shared on its own. The developer portal's Content access tab does
+   the same job from the other side, if the user prefers it.
+
+   Ask them to tell you when each one is done, and wait for the answer before moving on.
+
+4. For each page or database named, find and confirm its id.
+
+   Run `node .agents/skills/notion/notion.mjs search "<title>"` and read what came
+   back to the user by title and parent. An empty list almost always means step 3 has not
+   been done for that page: say so plainly, offer to wait, and do not guess an id or ask
+   for the token again. If several results match, list them and ask which one is meant.
+   Confirm every id with the user before recording it.
 
    Record each id as the kind it is, because the two kinds are not interchangeable and the
-   wrong one answers 404 exactly as an unconnected page does:
+   wrong one answers 404 exactly as an unshared page does:
    - A result whose `object` is `page` gives a page id in `id`. That is what `blocks`,
      `append` and `create-page --parent` want.
    - A result whose `object` is `data_source` is a table inside a database. Its `id` is the
@@ -247,11 +262,11 @@ Questions (ask one or two at a time and wait for the answer):
    If the user wants a notes page that does not exist yet, offer to create it under a page
    they name (`create-page`, dry run first, then `--confirm`).
 
-4. Optional: "Do you want a daily check of a database for new rows? If so, which one and
+5. Optional: "Do you want a daily check of a database for new rows? If so, which one and
    at what time?" Default to no schedule. If yes, default 09:00 in the user's timezone.
 
 Files:
-- `team/notion.json` in the workspace root, written after question 3 and updated whenever
+- `team/notion.json` in the workspace root, written after question 4 and updated whenever
   a page is added:
 
   ```json
@@ -295,11 +310,10 @@ Files:
   skip the second if no `database_id` was recorded. If any of them answers 404, report the
   id it named and which kind that id is before calling anything a sharing gap.
 
-Dependencies: none. Say that no `npm install` is needed because the client has zero
-dependencies.
+Dependencies: none.
 
-Schedule (only if the user said yes in question 4): one run named "Notion daily check",
-every day at the time from question 4 (default 09:00) in the user's timezone, quiet unless
+Schedule (only if the user said yes in question 5): one run named "Notion daily check",
+every day at the time from question 5 (default 09:00) in the user's timezone, quiet unless
 something needs a human. Prompt for that run, verbatim:
 
 ```text
@@ -307,7 +321,7 @@ Using the notion skill and the database recorded under databases.watch in team/n
 ```
 
 Close with three lines: what is set up (token present, pages in `team/notion.json`, the
-daily check if chosen), what still needs the user (nothing, or the pages that are not
-connected yet), and the validation line as the single suggested reply.
+daily check if chosen), what still needs the user (nothing, or the pages that have not been
+shared with the connection yet), and the validation line as the single suggested reply.
 
 Validation: Find the notes page you set up in Notion and show me the first five blocks on it.
