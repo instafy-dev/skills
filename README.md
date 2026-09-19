@@ -53,6 +53,16 @@ Rules:
   still reads; a first sentence that cannot be recovered that way is dropped entirely, and
   the card falls back to its own wording. Later sentences are never promoted, so a
   terminology footnote in sentence two cannot end up on a card.
+- A "## Getting started" walkthrough is spoken to the person in the chat, so it is the place
+  to be as thorough as the reader needs. Assume someone who has never made an API token and
+  has never seen the provider's developer screens: name the screens, say what to click, and
+  say what to do when the menu the provider documents is not there. The card beside the chat
+  carries one sentence, which is an address, not a lesson.
+- Write provider addresses in a walkthrough as a backticked host with no scheme, like
+  `app.notion.com/developers/connections`. The chat renders a backticked host as inert text,
+  while a full `https://` address becomes a link the person can click. A link a pack wrote
+  is a link a reader of that pack chose, so the product writes the real host out beside any
+  label it does not recognise. Never write a link and tell the person to click it.
 - Where-to-get first sentences are refused, not shortened, past 160 characters. Put the
   screen the value sits on in that sentence, and the caveats, recovery steps and naming
   disputes after it.
