@@ -149,7 +149,11 @@ request, 2000 characters per text run (longer runs are split), 100 KB of text.
   second kind is tried, and the error is Notion's own bare `object_not_found`. Only after
   the kind is settled, ask the user to connect the page to the connection. A 401 means the
   token is invalid or revoked; the fix is a replaced value in the environment, never a
-  value in chat.
+  value in chat. When the 401 says the Authorization header must use the format
+  `Bearer <token>`, the saved value was not a token at all: usually the words around it
+  were copied instead of the value, or the masked display instead of what the Copy button
+  gives. Say that plainly, and ask for the value again from the Copy button on the
+  connection's Configuration tab.
 - When you summarise a page for the user, quote sparingly and name the page. Copy nothing
   from Notion into a public place.
 - Paths are relative to the workspace root; never use an absolute path.
