@@ -183,7 +183,10 @@ Questions (ask one or two at a time and wait for the answer):
    insisting on one.
 
    - "Open `app.notion.com/developers/connections`. If that page opens, go straight to the
-     next step." Only if it does not open, or there is no Developer section in the sidebar:
+     next step." If the person lands on the portal's Get started tab instead, tell them to
+     ignore Build a Worker, which is the first and largest thing on it and is a different
+     Notion product for hosted scripts; what they want is Create a connection, further
+     down, or the Connections tab. Only if it does not open, or there is no Developer section in the sidebar:
      "In Notion open Settings and look for Developer, then switch on Enable developer
      features. Notion's help centre calls the same switch Developer Mode and tells you to
      search Settings for it, so try typing Developer into the Settings search if neither
