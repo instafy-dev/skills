@@ -217,8 +217,9 @@ Questions (ask one or two at a time and wait for the answer):
      `NOTION_API_KEY` and nowhere else.
 
    Once the token is present, run the skill's `status` check and tell the user in one
-   sentence whether the connection is working. Do not show the command or its output: the
-   report is for you and the logs. It prints `configured` or `missing`, never the token,
+   sentence whether the connection is working, naming the workspace when the report has
+   one. Do not show the command or its output, and do not mention the API version or the
+   token state: those are for you and the logs. It prints `configured` or `missing`, never the token,
    and `connection` is the part that matters. With No user information chosen above,
    Notion may return the bot name as `null` while the connection is perfectly healthy, so
    a missing name is not a failure signal; only `connection` not being `ok` is. If it is
