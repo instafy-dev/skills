@@ -1033,3 +1033,24 @@ test("status says whether the connection is healthy, and the exit code follows",
   assert.equal(noKeyReport.connection, "skipped: NOTION_API_KEY missing");
   assert.equal(noKeyReport.ok, false);
 });
+
+test("status names words saved in place of the token, without a request and without the words", async () => {
+  // The first real run saved an eight-word sentence as NOTION_API_KEY. Notion
+  // answered 401 "Authorization header must use the format Bearer <token>",
+  // which the agent could only paraphrase. A token has no whitespace inside
+  // it, so the check names the mistake itself and never sends the value.
+  const words = "Installation access token for the Instafy connection.";
+  const fetch = fakeFetch(() => jsonResponse({ object: "user", id: "bot-1" }));
+  const result = await runMain(["status"], {
+    env: { ...fakeEnv(), NOTION_API_KEY: words },
+    fetch,
+  });
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.ok, false);
+  assert.equal(report.api_key, "configured");
+  assert.match(report.connection, /^failed: NOTION_API_KEY is not a token: it has spaces inside it/);
+  assert.equal(result.stdout.includes(words), false);
+  assert.equal(result.stderr.includes(words), false);
+});

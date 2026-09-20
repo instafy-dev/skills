@@ -481,6 +481,16 @@ export function createClient({
       report.connection = "skipped: NOTION_API_KEY missing";
       return report;
     }
+    // A token never has whitespace inside it. Words saved in place of the
+    // value (a label, a sentence from the portal) would otherwise go to Notion
+    // and come back as a 401 about the header's format, which says nothing a
+    // person can act on. Named here instead, from a boolean about the value,
+    // with no request made and nothing of the value printed.
+    if (/\s/.test(settings.apiKey)) {
+      report.connection =
+        "failed: NOTION_API_KEY is not a token: it has spaces inside it, so words were copied in place of the value";
+      return report;
+    }
     try {
       const user = await me();
       report.connection = "ok";

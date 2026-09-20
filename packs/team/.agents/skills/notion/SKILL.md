@@ -222,8 +222,12 @@ Questions (ask one or two at a time and wait for the answer):
    and `connection` is the part that matters. With No user information chosen above,
    Notion may return the bot name as `null` while the connection is perfectly healthy, so
    a missing name is not a failure signal; only `connection` not being `ok` is. If it is
-   not `ok`, say in plain words that the token is wrong or was revoked and ask for a
-   replaced value.
+   not `ok`: when `connection` says the value is not a token, or that the header must use
+   the format `Bearer <token>`, say in one sentence that what was saved was not the token
+   (it has spaces in it, so words were copied in place of the value) and that the Copy
+   button beside Installation access token gives the right one. Otherwise say the token
+   is wrong or was revoked. Either way ask for a replaced value in plain sentences: no
+   "please", no "authorization format", and no verdict on the person.
 
 2. "Which pages or databases should I work with, and what for?" Suggest two roles: a
    running notes page where the agent appends what it did and learned, and optionally a
