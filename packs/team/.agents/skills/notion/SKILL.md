@@ -32,7 +32,7 @@ value in chat and never print one.
 
 | Name | Sensitive | What it is | Where the user gets it |
 | --- | --- | --- | --- |
-| `NOTION_API_KEY` | Yes | The Installation access token of an internal connection. It starts with `ntn_`. Notion now says connection where it used to say integration, and Installation access token where it used to say internal integration secret; it is the same value. | Open your connection's Configuration tab in the Notion developer portal, under Build, then Internal connections: the Installation access token is there. The portal is at `app.notion.com/developers/connections`, and a connection is made under Build, Internal connections, Create a new connection, where you name it and pick the workspace. On that same Configuration tab leave Read content and Insert content on, turn Update content off, and under user capabilities choose No user information. If there is no Developer section and the portal will not open, switch it on in Settings first (see Getting started, which has the walkthrough and both names Notion uses for that switch). |
+| `NOTION_API_KEY` | Yes | The Installation access token of an internal connection. It starts with `ntn_`. Notion now says connection where it used to say integration, and Installation access token where it used to say internal integration secret; it is the same value. | Open your connection's Configuration tab in the Notion developer portal: the Installation access token is there. The portal is at `app.notion.com/developers/connections`, under Developer tools; a connection is made on its Connections tab with New connection, where you name it and pick the workspace. Notion's docs still call this Build, then Internal connections, then Create a new connection. On that same Configuration tab leave Read content and Insert content on, turn Update content off, and under user capabilities choose No user information. If there is no Developer section and the portal will not open, switch it on in Settings first (see Getting started, which has the walkthrough and both names Notion uses for that switch). |
 
 The connection must be given access to each page or database it should see: in Notion,
 open the page, choose the `...` menu, then Connections, then `+ Add connection`. The
@@ -190,9 +190,11 @@ Questions (ask one or two at a time and wait for the answer):
      name is showing." It is a per-device setting, so someone who turned it on in the
      desktop app may still not see it in the browser. Do not treat this as a gate that
      blocks everything else: the portal is often reachable without touching it.
-   - "In the sidebar under Build, choose Internal connections, then Create a new
-     connection. Give it a name you will recognise later, and pick this workspace." The
-     same list is reachable from the Developer section inside Notion itself, if the portal
+   - "Open Developer tools, choose the Connections tab, then New connection. Give it a
+     name you will recognise later, and pick this workspace." Notion's own docs still
+     describe this as the sidebar's Build section, then Internal connections, then Create
+     a new connection; the screen in front of the user is the one that counts. The same
+     list is reachable from the Developer section inside Notion itself, if the portal
      opens there rather than as its own page. Notion's developer docs say a workspace owner
      does this; if the option is missing or refused, ask an owner of the workspace to make
      it.
