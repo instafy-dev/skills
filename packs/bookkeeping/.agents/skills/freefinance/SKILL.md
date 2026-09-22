@@ -31,8 +31,8 @@ value in chat and never print one.
 
 | Name | Sensitive | What it is | Where the user gets it |
 | --- | --- | --- | --- |
-| `FREEFINANCE_API_CLIENT_ID` | Yes | The technical user's API client id. FreeFinance documents it in two shapes and both are current: two number groups joined by an underscore, like `21334_21715633`, and the same thing behind a literal `technical_api_user_` prefix, as in the documented token request `client_id=technical_api_user_XXXXX_XXXXXXXXXX`. The first number group is the numeric Mandant id and the second is a random suffix. Copy whatever FreeFinance shows, prefix included; the skill never parses this value. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Id. The dialog is titled Technischen Nutzer erstellen and also shows the Mandanten Nr. and the Client-Secret, each with a copy button; the API user is the row whose Name des Geräts reads API in the page's second table. The English developer documentation still calls that page Connected devices. |
-| `FREEFINANCE_API_CLIENT_SECRET` | Yes | The technical user's secret. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Secret and a copy button. It is the same dialog that shows the Client-Id, so the secret can be read again later, which FreeFinance's documentation does not say. Only one technical user exists per Mandant; deleting it on that page and creating a new one issues a new id and a new secret, and both variables change together. |
+| `FREEFINANCE_API_CLIENT_ID` | Yes | The technical user's API client id. FreeFinance documents it in two shapes and both are current: two number groups joined by an underscore, like `21334_21715633`, and the same thing behind a literal `technical_api_user_` prefix, as in the documented token request `client_id=technical_api_user_XXXXX_XXXXXXXXXX`. The first number group is the numeric Mandant id and the second is a random suffix. Copy whatever FreeFinance shows, prefix included; the skill never parses this value. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Id, labelled Authentifizierung Client-Id, as text to select. The dialog is titled Technischen Nutzer erstellen and also shows the Mandanten Nr. and the Client-Secret, which has the dialog's only copy button; the API user is the row whose Name des Geräts reads API in the page's second table. The English developer documentation still calls that page Connected devices. |
+| `FREEFINANCE_API_CLIENT_SECRET` | Yes | The technical user's secret. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Secret and its copy button. It is the same dialog that shows the Client-Id, so the secret can be read again later, which FreeFinance's documentation does not say. Only one technical user exists per Mandant; deleting it on that page and creating a new one issues a new id and a new secret, and both variables change together. |
 | `FREEFINANCE_CLIENT_ID` | No, optional | The numeric Mandant id used in API paths. | The first number group of the API client id, before the underscore. The `clients` command also lists the ids; prefer recording the one you want in `bookkeeping/profile.json` (see Getting started) rather than setting this variable. |
 | `FREEFINANCE_API_BASE_URL` | No, optional | The address of the FreeFinance tenant to use. It defaults to the live one, `https://app.freefinance.at`; set `https://demo.freefinance.at` for a demo tenant. HTTPS only. The token endpoint that issuer discovery returns must be HTTPS on the same domain. | The address you sign in to FreeFinance at, shown in the browser address bar. Only needed for demo tenants. |
 
@@ -170,7 +170,7 @@ Needs:
   application; the walkthrough in question 1 has the steps and the names as they read on
   screen.
 - `FREEFINANCE_API_CLIENT_SECRET` (sensitive): the technical user's secret, shown on the
-  same dialog as the client id (the magnifier on the API row), with a copy button.
+  same dialog as the client id (the magnifier on the API row), with its own copy button.
 - `FREEFINANCE_API_BASE_URL` (not sensitive, optional): only for a demo tenant, set to
   `https://demo.freefinance.at`. No lookup needed. Leave unset for production.
 Both sensitive values must be present before any client command runs. Read them only from
@@ -196,7 +196,7 @@ Questions (ask one or two at a time and wait for the answer):
      The page has two tables: the first lists sessions, the second lists the API user, in
      a row whose Name des Geräts reads API. The magnifier on that row opens a dialog
      titled Technischen Nutzer erstellen, with the Client-Id, the Mandanten Nr. and the
-     Client-Secret, each with a copy button." If there is no API row yet, the technical
+     Client-Secret. The Client-Secret has a copy button; select the Client-Id by hand." If there is no API row yet, the technical
      user still has to be created on that page; the English documentation calls the page
      Connected devices and the action Create technical user, in case a help article says
      that instead. Do not tell them to press anything yet.
