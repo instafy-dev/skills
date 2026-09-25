@@ -233,10 +233,16 @@ Questions (ask one or two at a time and wait for the answer):
    `node .agents/skills/freefinance/client.mjs status` and show the masked result. It exits
    0 only when the credentials work and a Mandant came out of them. If `token` is not `ok`,
    first compare the id against the two shapes above before assuming the credential is
-   dead: a trimmed `technical_api_user_` prefix fails exactly like a wrong secret. Only
-   then say the id or secret is wrong or the technical user was deleted, and ask for
-   replaced values in the environment. Never suggest deleting the technical user as a first
-   step; it is not reversible and it invalidates the id already pasted. Then run
+   dead: a trimmed `technical_api_user_` prefix fails exactly like a wrong secret.
+   FreeFinance's answer to a rejected pair is `invalid_client: Invalid client or Invalid
+   client credentials`, the same for a wrong id and a wrong secret, so it never says which
+   one is wrong: say that FreeFinance did not accept the pair, and ask for both values again
+   in the platform's secure cards, with the copy hints: the Client-Id is the whole
+   `digits_digits` value next to Authentifizierung Client-Id, selected by hand to the last
+   digit; the Client-Secret comes from its copy button in the same dialog. A pair that
+   worked before and fails now most often means a character was lost when copying, not a
+   deleted technical user. Never suggest deleting the technical user as a first step; it is
+   not reversible and it invalidates the id already pasted. Then run
    `node .agents/skills/freefinance/client.mjs clients`. It will normally return exactly
    one: the Mandant the technical user was created under. Confirm it by `display_name` and
    `id`. If the company the user meant is not the one listed, the technical user was created
