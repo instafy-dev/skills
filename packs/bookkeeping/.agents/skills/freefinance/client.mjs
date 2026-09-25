@@ -658,19 +658,52 @@ async function fetchJson(fetchImpl, url, options, context) {
 }
 
 export function readSettings(env = process.env) {
+  // Both credentials are trimmed. A pasted value often carries a trailing
+  // newline or space, and neither a Client-Id nor a Keycloak client secret
+  // ever contains whitespace, so the posted value is the one scrubbed.
   const settings = {
     baseUrl: normalizeBaseUrl(env.FREEFINANCE_API_BASE_URL || DEFAULT_BASE_URL),
     apiClientId: String(env.FREEFINANCE_API_CLIENT_ID ?? "").trim(),
-    apiClientSecret: String(env.FREEFINANCE_API_CLIENT_SECRET ?? ""),
+    apiClientSecret: String(env.FREEFINANCE_API_CLIENT_SECRET ?? "").trim(),
     clientId: String(env.FREEFINANCE_CLIENT_ID ?? "").trim() || null,
   };
   return settings;
+}
+
+// The two Client-Id shapes FreeFinance documents, 21334_21715633 and
+// technical_api_user_21334_21715633. A Keycloak client secret never has this
+// shape, so it tells which value was saved in both when the two are
+// identical. It is read for nothing else; the id is always sent as saved.
+const API_CLIENT_ID_SHAPE = /^(?:technical_api_user_)?\d+_\d+$/;
+
+// Identical values mean one of the two was pasted into both. Returns which
+// one, "client id" or "client secret", or null when the values differ.
+function credentialSavedInBoth(settings) {
+  if (!settings.apiClientId || settings.apiClientId !== settings.apiClientSecret) {
+    return null;
+  }
+  return API_CLIENT_ID_SHAPE.test(settings.apiClientId) ? "client id" : "client secret";
 }
 
 function requireCredentials(settings) {
   if (!settings.apiClientId || !settings.apiClientSecret) {
     throw new Error(
       "Set FREEFINANCE_API_CLIENT_ID and FREEFINANCE_API_CLIENT_SECRET in the environment.",
+    );
+  }
+  // FreeFinance answers every wrong pair with the same 401, "Invalid client
+  // or Invalid client credentials", which cannot say which value is wrong.
+  // Identical values are named here instead, before any request, with the
+  // one value to save again and without echoing either.
+  const savedInBoth = credentialSavedInBoth(settings);
+  if (savedInBoth === "client id") {
+    throw new Error(
+      "The saved FREEFINANCE_API_CLIENT_SECRET is identical to FREEFINANCE_API_CLIENT_ID, so the Client-Secret was not pasted. Copy it with the copy button next to Client-Secret in the API row's dialog under Verbundene Apps, and save only that value again.",
+    );
+  }
+  if (savedInBoth === "client secret") {
+    throw new Error(
+      "The saved FREEFINANCE_API_CLIENT_ID is identical to FREEFINANCE_API_CLIENT_SECRET and is not shaped like a Client-Id, so the Client-Secret was saved in both. Select the whole Client-Id by hand next to Authentifizierung Client-Id in the API row's dialog under Verbundene Apps, and save only that value again.",
     );
   }
 }
@@ -945,6 +978,15 @@ export function createClient({
       client_source: null,
       token: null,
     };
+    // The same mistake the token check below refuses, named on the line of
+    // the value to replace. When the secret was saved in both, the masked id
+    // would show the secret's last characters, so it is not shown.
+    const savedInBoth = credentialSavedInBoth(settings);
+    if (savedInBoth === "client id") {
+      report.api_client_secret = "same as client id";
+    } else if (savedInBoth === "client secret") {
+      report.api_client_id = "same as client secret";
+    }
     if (!settings.apiClientId || !settings.apiClientSecret) {
       report.token = "skipped: credentials missing";
       return report;
@@ -1152,10 +1194,12 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   const stdout = deps.stdout ?? ((text) => process.stdout.write(`${text}\n`));
   const stderr = deps.stderr ?? ((text) => process.stderr.write(`${text}\n`));
   // Both credential values are scrubbed from everything written to stdout or
-  // stderr, so an error body that echoes one never reaches the terminal.
+  // stderr, so an error body that echoes one never reaches the terminal. They
+  // are trimmed as readSettings trims them, because the trimmed value is the
+  // one sent and so the one a response can echo.
   const env = deps.env ?? process.env;
   const secrets = [
-    String(env.FREEFINANCE_API_CLIENT_SECRET ?? ""),
+    String(env.FREEFINANCE_API_CLIENT_SECRET ?? "").trim(),
     String(env.FREEFINANCE_API_CLIENT_ID ?? "").trim(),
   ];
 
