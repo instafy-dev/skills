@@ -519,6 +519,108 @@ test("token errors surface the response detail and not the secret", async () => 
   });
 });
 
+// A user pasted the Client-Id into both saved values. FreeFinance answers any
+// wrong pair with the same 401, so the agent could only say that one of the
+// two was wrong. The client names this case itself, before any request.
+test("a secret identical to the client id fails before any request and echoes neither", async () => {
+  const prefixed = `technical_api_user_${API_CLIENT_ID}`;
+  for (const [id, secret] of [
+    [API_CLIENT_ID, API_CLIENT_ID],
+    [API_CLIENT_ID, `  ${API_CLIENT_ID}\n`],
+    [prefixed, prefixed],
+  ]) {
+    const env = fakeEnv({ FREEFINANCE_API_CLIENT_ID: id, FREEFINANCE_API_CLIENT_SECRET: secret });
+    const fetch = fakeFetch(() => jsonResponse({}));
+    const client = createClient({ env, fetch });
+    await assert.rejects(client.getAccessToken(), (error) => {
+      assert.match(
+        error.message,
+        /FREEFINANCE_API_CLIENT_SECRET is identical to FREEFINANCE_API_CLIENT_ID, so the Client-Secret was not pasted/,
+      );
+      assert.match(error.message, /copy button next to Client-Secret/);
+      assert.ok(!error.message.includes(API_CLIENT_ID));
+      return true;
+    });
+    assert.equal(fetch.calls.length, 0, JSON.stringify(secret));
+
+    const listing = await runMain(["clients"], { fetch, env });
+    assert.equal(listing.code, 1);
+    assert.match(listing.stderr, /identical to FREEFINANCE_API_CLIENT_ID/);
+    assert.ok(!listing.stderr.includes(API_CLIENT_ID));
+    assert.equal(listing.stdout, "");
+    assert.equal(fetch.calls.length, 0, JSON.stringify(secret));
+  }
+});
+
+// The Client-Secret has the dialog's only copy button, so it can land in both
+// cards too. Asking for the Client-Secret again would then save the same value
+// and repeat the same error, so the client names the Client-Id instead.
+test("a client id identical to a secret-shaped value names the Client-Id and echoes neither", async () => {
+  const secret = "Xq9fLk2Rz8pVb3Nw7Tc1Hy6Gd4Js0MaE";
+  const env = fakeEnv({
+    FREEFINANCE_API_CLIENT_ID: secret,
+    FREEFINANCE_API_CLIENT_SECRET: ` ${secret}\n`,
+  });
+  const fetch = fakeFetch(() => jsonResponse({}));
+  const client = createClient({ env, fetch });
+  await assert.rejects(client.getAccessToken(), (error) => {
+    assert.match(
+      error.message,
+      /FREEFINANCE_API_CLIENT_ID is identical to FREEFINANCE_API_CLIENT_SECRET and is not shaped like a Client-Id, so the Client-Secret was saved in both/,
+    );
+    assert.match(error.message, /Client-Id by hand next to Authentifizierung Client-Id/);
+    assert.doesNotMatch(error.message, /copy button/);
+    assert.ok(!error.message.includes(secret));
+    return true;
+  });
+  assert.equal(fetch.calls.length, 0);
+
+  const listing = await runMain(["clients"], { fetch, env });
+  assert.equal(listing.code, 1);
+  assert.match(listing.stderr, /so the Client-Secret was saved in both/);
+  assert.ok(!listing.stderr.includes(secret));
+  assert.equal(listing.stdout, "");
+
+  // The masked id would show the secret's last four characters here.
+  const { code, stdout, stderr } = await runMain(["status"], { fetch, env });
+  assert.equal(code, 1);
+  const report = JSON.parse(stdout);
+  assert.equal(report.ok, false);
+  assert.equal(report.api_client_id, "same as client secret");
+  assert.equal(report.api_client_secret, "configured");
+  assert.match(
+    report.token,
+    /^failed: The saved FREEFINANCE_API_CLIENT_ID is identical to FREEFINANCE_API_CLIENT_SECRET/,
+  );
+  assert.ok(!stdout.includes(secret.slice(-4)));
+  assert.equal(stderr, "");
+  assert.equal(fetch.calls.length, 0);
+});
+
+test("a secret saved with surrounding whitespace is posted and scrubbed trimmed", async () => {
+  const env = fakeEnv({ FREEFINANCE_API_CLIENT_SECRET: ` ${API_CLIENT_SECRET}\n` });
+  const fetch = fakeFetch(() => jsonResponse({}));
+  const client = createClient({ env, fetch });
+  await client.getAccessToken();
+  assert.equal(fetch.tokenCalls().length, 1);
+  assert.equal(fetch.tokenCalls()[0].options.body.get("client_secret"), API_CLIENT_SECRET);
+
+  // The trimmed value is the one sent, so it is the one a response can echo.
+  const echoing = async (url) => {
+    if (String(url).endsWith("/api/2.0/auth/issuer")) {
+      return jsonResponse({ realm: "demo", url: ISSUER_URL });
+    }
+    return jsonResponse(
+      { error: "invalid_client", error_description: `bad secret ${API_CLIENT_SECRET}` },
+      401,
+    );
+  };
+  const listing = await runMain(["clients"], { fetch: echoing, env });
+  assert.equal(listing.code, 1);
+  assert.match(listing.stderr, /failed \(401\): bad secret \*\*\*/);
+  assert.ok(!listing.stderr.includes(API_CLIENT_SECRET));
+});
+
 // ---------------------------------------------------------------------------
 // Reads, one per family, through the command line
 // ---------------------------------------------------------------------------
@@ -969,6 +1071,26 @@ test("status without credentials reports missing, exits 1 and skips the token ch
   assert.equal(report.api_client_secret, "missing");
   assert.match(report.token, /skipped/);
   assert.equal(fetch.calls.length, 0);
+});
+
+test("status names a secret that is the client id, without a request and without either value", async () => {
+  const fetch = fakeFetch(() => jsonResponse({}));
+  const { code, stdout, stderr } = await runMain(["status"], {
+    fetch,
+    env: fakeEnv({ FREEFINANCE_API_CLIENT_SECRET: `${API_CLIENT_ID} ` }),
+  });
+  assert.equal(code, 1);
+  const report = JSON.parse(stdout);
+  assert.equal(report.ok, false);
+  assert.equal(report.api_client_id, "...2222");
+  assert.equal(report.api_client_secret, "same as client id");
+  assert.match(
+    report.token,
+    /^failed: The saved FREEFINANCE_API_CLIENT_SECRET is identical to FREEFINANCE_API_CLIENT_ID/,
+  );
+  assert.equal(fetch.calls.length, 0);
+  assert.ok(!stdout.includes(API_CLIENT_ID));
+  assert.equal(stderr, "");
 });
 
 test("status exits 1 when the token works but no Mandant can be chosen", async () => {

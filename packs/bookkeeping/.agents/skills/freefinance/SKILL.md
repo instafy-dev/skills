@@ -31,7 +31,7 @@ value in chat and never print one.
 
 | Name | Sensitive | What it is | Where the user gets it |
 | --- | --- | --- | --- |
-| `FREEFINANCE_API_CLIENT_ID` | Yes | The technical user's API client id. FreeFinance documents it in two shapes and both are current: two number groups joined by an underscore, like `21334_21715633`, and the same thing behind a literal `technical_api_user_` prefix, as in the documented token request `client_id=technical_api_user_XXXXX_XXXXXXXXXX`. The first number group is the numeric Mandant id and the second is a random suffix. Copy whatever FreeFinance shows, prefix included; the skill never parses this value. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Id, labelled Authentifizierung Client-Id, as text to select. The dialog is titled Technischen Nutzer erstellen and also shows the Mandanten Nr. and the Client-Secret, which has the dialog's only copy button; the API user is the row whose Name des Geräts reads API in the page's second table. The English developer documentation still calls that page Connected devices. |
+| `FREEFINANCE_API_CLIENT_ID` | Yes | The technical user's API client id. FreeFinance documents it in two shapes and both are current: two number groups joined by an underscore, like `21334_21715633`, and the same thing behind a literal `technical_api_user_` prefix, as in the documented token request `client_id=technical_api_user_XXXXX_XXXXXXXXXX`. The first number group is the numeric Mandant id and the second is a random suffix. Copy whatever FreeFinance shows, prefix included; the skill sends it as saved and checks its shape only when it is identical to the secret. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Id, labelled Authentifizierung Client-Id, as text to select. The dialog is titled Technischen Nutzer erstellen and also shows the Mandanten Nr. and the Client-Secret, which has the dialog's only copy button; the API user is the row whose Name des Geräts reads API in the page's second table. The English developer documentation still calls that page Connected devices. |
 | `FREEFINANCE_API_CLIENT_SECRET` | Yes | The technical user's secret. | Open Mein Profil, then Benutzer & Berechtigung, then Verbundene Apps: the magnifier on the API row opens a dialog with the Client-Secret and its copy button. It is the same dialog that shows the Client-Id, so the secret can be read again later, which FreeFinance's documentation does not say. Only one technical user exists per Mandant; deleting it on that page and creating a new one issues a new id and a new secret, and both variables change together. |
 | `FREEFINANCE_CLIENT_ID` | No, optional | The numeric Mandant id used in API paths. | The first number group of the API client id, before the underscore. The `clients` command also lists the ids; prefer recording the one you want in `bookkeeping/profile.json` (see Getting started) rather than setting this variable. |
 | `FREEFINANCE_API_BASE_URL` | No, optional | The address of the FreeFinance tenant to use. It defaults to the live one, `https://app.freefinance.at`; set `https://demo.freefinance.at` for a demo tenant. HTTPS only. The token endpoint that issuer discovery returns must be HTTPS on the same domain. | The address you sign in to FreeFinance at, shown in the browser address bar. Only needed for demo tenants. |
@@ -49,13 +49,16 @@ statements, journals, invoices, accounts and tax classes, plus reading and writi
 staging folder. If none of those names is on screen, ask the user to read out what the role
 list actually shows rather than guessing. That screen belongs to the Inhaber of the
 Mandant: the help states "Der Inhaber ist die einzige Person, die berechtigt ist diese
-Einstellungen durchzuführen." A 401 or 403 on one resource usually means the role lacks
-that permission; report it as a permission gap, do not ask for the credential again.
+Einstellungen durchzuführen." A 401 or 403 on one resource, after a token was issued,
+usually means the role lacks that permission; report it as a permission gap, do not ask for
+the credential again.
 
 Tokens live about five minutes. The client mints one per run and re-mints once when a
 request answers 401. The credentials themselves do not expire, so a failed token request
-means the id or secret is wrong, or the technical user was deleted in the web application;
-the fix is a replaced credential in the environment, never a value in chat.
+means the id or secret is wrong, or the technical user was deleted in the web application.
+The fix is to ask for the values again in the platform's secure cards, as question 3 of
+Getting started describes, even when the user says they already replaced them; never a
+value in chat.
 
 ## Running the client
 
@@ -148,7 +151,8 @@ to go.
 - UVA (VAT returns) and FinanzOnline filing are not in the API. They stay in the web
   application and are a separate, human act. Do not promise to file anything.
 - An expired token is handled by re-running the command, not by requesting the secret
-  again. A 401 or 403 on one resource is a permission gap in the technical user's role.
+  again. A 401 or 403 on one resource, after a token was issued, is a permission gap in the
+  technical user's role. A rejected token request is not: see question 3.
 - Do not report a state the API did not return. A bank statement line carries `state`
   (about duplicate imports) and its dates and amounts, and nothing about whether a person
   has handled it; `--line-type NEW` is a filter, so what it returns is the answer to that
@@ -231,9 +235,14 @@ Questions (ask one or two at a time and wait for the answer):
 
 3. Confirm the Mandant, once both credentials are present. Run
    `node .agents/skills/freefinance/client.mjs status` and show the masked result. It exits
-   0 only when the credentials work and a Mandant came out of them. If `token` is not `ok`,
-   first compare the id against the two shapes above before assuming the credential is
-   dead: a trimmed `technical_api_user_` prefix fails exactly like a wrong secret.
+   0 only when the credentials work and a Mandant came out of them. If `api_client_secret`
+   reads `same as client id`, the Client-Id was saved in both; if `api_client_id` reads
+   `same as client secret`, the Client-Secret was. Nothing was sent, and a command's error
+   says the same. Ask again only for the value on that line, in its secure card: the
+   Client-Secret from its copy button, the Client-Id selected by hand. If the same report
+   comes back after that value was saved again, ask for both. Otherwise, if `token` is not
+   `ok`, first compare the id against the two shapes above before assuming the credential
+   is dead: a trimmed `technical_api_user_` prefix fails exactly like a wrong secret.
    FreeFinance's answer to a rejected pair is `invalid_client: Invalid client or Invalid
    client credentials`, the same for a wrong id and a wrong secret, so it never says which
    one is wrong: say that FreeFinance did not accept the pair, and ask for both values again
