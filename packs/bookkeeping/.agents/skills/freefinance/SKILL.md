@@ -164,6 +164,10 @@ to go.
   field and the user cannot tell from the result.
 - Paths are relative to the workspace root. The Mandant lives in `bookkeeping/profile.json`;
   never write it anywhere else and never use an absolute path.
+- Mandant is FreeFinance's word for the company whose books it keeps, and someone new to
+  FreeFinance may not know it. The first time you say it to the person, explain it in one
+  short clause, like "the Mandant (the company whose books FreeFinance keeps)", and use the
+  word alone after that.
 
 ## Getting started
 
@@ -254,10 +258,12 @@ Questions (ask one or two at a time and wait for the answer):
    not reversible and it invalidates the id already pasted. Then run
    `node .agents/skills/freefinance/client.mjs clients`. It will normally return exactly
    one: the Mandant the technical user was created under. Confirm it by `display_name` and
-   `id`. If the company the user meant is not the one listed, the technical user was created
-   under a different Mandant and has to be recreated there; say so rather than offering a
-   choice the credential cannot honour. If several are listed, ask which one this workspace
-   keeps books for and list `display_name` and `id` for each.
+   `id`: "FreeFinance lists one Mandant (the company whose books FreeFinance keeps):
+   <display_name>, id <id>. Is that the one this workspace is for?" If the company the user
+   meant is not the one listed, the technical user was created under a different Mandant and
+   has to be recreated there; say so rather than offering a choice the credential cannot
+   honour. If several are listed, ask which one this workspace keeps books for and list
+   `display_name` and `id` for each.
 
 4. "When should the weekly FreeFinance check run?" Default Monday 08:00 in the user's
    timezone. This question can be asked while waiting for the credentials.
